@@ -58,6 +58,9 @@ class RuleBasedAgent:
     color = "#F97316"
 
     def __init__(self):
+        # Persists across episodes intentionally: gives later episodes a
+        # "memory" of all-time visit counts, slightly diversifying picks
+        # over the full training run (never reset between episodes).
         self.visit_counts = np.zeros(N_ACTIONS)
 
     def select(self, state, valid_actions):
@@ -109,8 +112,8 @@ class GreedyAgent:
         return max(q_valid, key=lambda x: x[0])[1]
 
     def update(self, action, state, reward, *args, **kwargs):
+        # state unused — context-free Q-table (contrast with LinUCBAgent)
         self.count[action] += 1
-        # incremental mean: Q ← Q + (r - Q) / n
         self.Q[action] += (reward - self.Q[action]) / self.count[action]
 
 
@@ -143,6 +146,7 @@ class EpsilonGreedyAgent:
         return max(q_valid, key=lambda x: x[0])[1]   # exploit
 
     def update(self, action, state, reward, *args, **kwargs):
+        # state unused — context-free Q-table (same as GreedyAgent)
         self.count[action] += 1
         self.Q[action] += (reward - self.Q[action]) / self.count[action]
 

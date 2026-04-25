@@ -33,12 +33,12 @@ WEEKLY_CALORIES  = 18000
 
 
 def make_profile(seed=None):
-    if seed is not None:
-        np.random.seed(seed)
+    rng = np.random.default_rng(seed)
     return UserProfile(
         preferred_cat="Japanese", budget_sensitivity=0.5,
         calorie_sensitivity=0.3, fatigue_sensitivity=0.6,
         noise=0.1, preference_drift_at=10, drift_to="Korean",
+        _rng=rng,
     )
 
 
@@ -70,9 +70,14 @@ def run_ppol(env, agent, train=True):
         lp = agent.logprob(s, a, valid) if train else 0.0
         ns, r, done, info = env.step(a)
         if train:
-            r_accept = info.get("r_accept", r)
-            b_cost = MEALS[a]["price"]    / WEEKLY_BUDGET
-            c_cost = MEALS[a]["calories"] / WEEKLY_CALORIES
+            assert "r_accept" in info, (
+                "env.step() info must contain 'r_accept' for PPO-L; "
+                "got keys: " + str(list(info.keys()))
+            )
+            r_accept = info["r_accept"]
+            accepted = info["response"] in ("accept", "accept_browse")
+            b_cost = MEALS[a]["price"]    / WEEKLY_BUDGET if accepted else 0.0
+            c_cost = MEALS[a]["calories"] / WEEKLY_CALORIES if accepted else 0.0
             agent.store(s, a, r_accept, lp, float(done), valid, b_cost, c_cost)
         s = ns; total += r
     if train:

@@ -161,10 +161,11 @@ class TasteFlowEnv:
         # filter: meal must serve this meal time
         mt = MEAL_TIMES[meal_t_idx]
         if mt not in meal["meal_types"]:
-            # invalid action → force churn equivalent but mild
             reward = -3.0
             response = "invalid"
-            self._advance(meal, response, reward, day_idx, meal_t_idx)
+            self._advance(meal, response, reward, day_idx, meal_t_idx,
+                          r_accept=reward, r_goal=0.0,
+                          r_budget=0.0, r_calorie=0.0, r_variety=0.0)
             return self._get_state(), reward, self.done, self._last_log()
 
         # user response
@@ -238,8 +239,12 @@ class TasteFlowEnv:
             elif budget_ok or calorie_ok:
                 r_terminal = 20.0
             elif self.consec_churns < CHURN_LIMIT:
+                # Both constraints violated but episode survived to MAX_STEPS
+                # (not killed by consecutive churns). Small positive reward for
+                # persisting — the agent at least kept the user engaged.
                 r_terminal = 5.0
             else:
+                # Killed by consecutive churns — worst outcome.
                 r_terminal = -30.0
             if not self.use_terminal_reward:
                 r_terminal = 0.0
@@ -295,6 +300,12 @@ class TasteFlowEnv:
         return self.log[-1] if self.log else {}
 
     def get_valid_actions(self):
+        # Two-tier constraint design:
+        #   HARD (action mask): meal_time fit + accepts_meal() — per-meal absolute
+        #     limits (max_price, max_calories, disliked categories, avoided tags).
+        #     These meals are never proposed, so the agent receives no signal for them.
+        #   SOFT (Lagrangian): weekly_budget and weekly_calories — enforced as
+        #     aggregate constraints via PPO-L's dual variables, not per-meal masks.
         mt = MEAL_TIMES[self.step_idx % N_MEALS_DAY]
         meal_time_valid = [i for i, m in enumerate(MEALS) if mt in m["meal_types"]]
         constrained = [
@@ -327,7 +338,7 @@ class UserProfile:
                  calorie_sensitivity=0.3, fatigue_sensitivity=0.6,
                  noise=0.15, preference_drift_at=None, drift_to=None,
                  preferred_tags=None, avoided_tags=None, disliked_cats=None,
-                 max_price=None, max_calories_per_meal=None):
+                 max_price=None, max_calories_per_meal=None, _rng=None):
         self.preferred_cat        = preferred_cat or "Japanese"
         self.budget_sensitivity   = budget_sensitivity
         self.calorie_sensitivity  = calorie_sensitivity
@@ -342,6 +353,7 @@ class UserProfile:
         self.max_price            = max_price
         self.max_calories_per_meal = max_calories_per_meal
         self.tag_affinity         = {tag: 0.0 for meal in MEALS for tag in meal.get("tags", [])}
+        self._rng                 = _rng or np.random.default_rng()
 
         n = N_CAT
         idx = CATEGORIES.index(self.preferred_cat)
@@ -433,7 +445,7 @@ class UserProfile:
             base += 0.2
 
         # add noise
-        score = base + np.random.normal(0, self.noise)
+        score = base + self._rng.normal(0, self.noise)
 
         self.step_count += 1
 
