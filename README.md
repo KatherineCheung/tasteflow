@@ -3,7 +3,7 @@
 ## Quick Start
 
 ```bash
-pip install streamlit numpy matplotlib plotly
+pip install -r requirements.txt
 python train.py       # ~90 seconds — trains PPO + CPO + evaluates all 5 agents
 streamlit run app.py  # opens in browser at localhost:8501
 ```
@@ -16,6 +16,25 @@ streamlit run app.py  # opens in browser at localhost:8501
 | `agents.py` | 5 agents: Random, Rule-Based, LinUCB, PPO, **CPO** |
 | `train.py` | Trains PPO + CPO, evaluates all agents, saves `tasteflow_results.pkl` |
 | `app.py` | Streamlit demo — two modes, five tabs |
+| `requirements.txt` | Python dependencies for local setup and Streamlit Community Cloud |
+| `runtime.txt` | Python runtime version for Streamlit Community Cloud |
+
+## Deployment
+
+This app is built with Streamlit, so deploy it as a Python web app rather than GitHub Pages.
+GitHub Pages only serves static HTML/CSS/JS and cannot run `app.py`.
+
+Recommended deployment target: **Streamlit Community Cloud**.
+
+1. Push this repository to GitHub.
+2. In Streamlit Community Cloud, create a new app from the GitHub repo.
+3. Set the main file path to `app.py`.
+4. Keep `requirements.txt`, `runtime.txt`, and `tasteflow_results.pkl` in the repo.
+5. After each `git push` to the deployed branch, Streamlit Cloud will redeploy the app.
+
+`tasteflow_results.pkl` is intentionally kept in the repo so the deployed demo can load trained
+curves and agent weights immediately. If you retrain locally with `python train.py`, commit the
+updated file when you want the hosted demo to show the new results.
 
 ## Demo Modes
 

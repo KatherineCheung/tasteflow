@@ -586,11 +586,13 @@ if mode == "📊 Watch the Agent Learn":
                 xaxis=dict(**GRID),
                 yaxis=dict(title="% Change vs Random Baseline",
                            **GRID, zeroline=True),
-                legend=dict(bgcolor="rgba(255,255,255,0.95)",
-                            bordercolor="#E2E8F0", borderwidth=1,
-                            orientation="h", yanchor="bottom", y=1.02),
                 margin=dict(t=50, b=20, l=60, r=20),
             )
+            fig_gain.update_layout(legend=dict(
+                bgcolor="rgba(255,255,255,0.95)",
+                bordercolor="#E2E8F0", borderwidth=1,
+                orientation="h", yanchor="bottom", y=1.02,
+            ))
             st.plotly_chart(fig_gain, use_container_width=True)
 
             # ── 4. Key Takeaways (high-contrast) ──
