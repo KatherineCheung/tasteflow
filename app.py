@@ -509,7 +509,7 @@ with st.sidebar:
         st.markdown("""
 **TasteFlow** trains **PPO** and **CPO** to learn weekly food preferences.
 
-- **State (25-dim):** budget, calories, fatigue, meal time, prefs
+- **State (24-dim):** budget, calories, fatigue, meal time, prefs
 - **Reward:** accept +5, reject −2, churn −10, weekly goals +50
 - **Episode:** 21 meals (3/day × 7 days)
         """)
@@ -774,7 +774,7 @@ if mode == "📊 Watch the Agent Learn":
                 "Rule-Based": ("#EA580C", "Hand-tuned heuristic — preference + fatigue + budget score. No learning, but structured."),
                 "LinUCB":     ("#CA8A04", "Contextual bandit — learns preferences but treats each meal as independent, so budget pacing fails."),
                 "PPO":        ("#0F766E", "Best overall reward. Full MDP with temporal reasoning — learns to pace budget and calories across the week."),
-                "CPO":        ("#7C3AED", "Explicit constraint enforcement via Lagrange multipliers — provably satisfies goals; trades some reward for compliance."),
+                "CPO":        ("#7C3AED", "Explicit constraint enforcement via Lagrange multipliers — enforces budget/calorie goals; trades some reward for compliance."),
             }
             for n in agent_names:
                 col, text = takeaways.get(n, ("#94A3B8", n))
@@ -940,7 +940,7 @@ if mode == "📊 Watch the Agent Learn":
             st.markdown("""
 **Why CPO?** PPO folds budget and calorie goals into the reward as *soft bonuses* —
 the agent can trade constraint satisfaction for higher acceptance rewards.
-CPO treats them as **hard constraints** via Lagrangian relaxation, provably satisfying
+CPO treats them as **hard constraints** via Lagrangian relaxation, enforcing
 them at convergence regardless of the reward landscape.
 """)
 

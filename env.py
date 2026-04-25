@@ -19,6 +19,9 @@ FATIGUE_DECAY   = 0.6      # λ — half-life of ~2.5 meals
 CHURN_LIMIT     = 4        # consecutive churns → episode ends early
 STATE_DIM       = 4 + N_CAT + 4 + (N_CAT + 2)  # 4+7+4+9 = 24
 
+# Clock hours of each meal slot (used to compute real time_since_last)
+MEAL_HOURS      = [8, 13, 19]   # Breakfast 08:00, Lunch 13:00, Dinner 19:00
+
 CATEGORY_EMOJIS = {
     "Japanese":  "🍜", "Chinese": "🥡", "Korean":  "🍲",
     "Fast Food": "🍔", "Light":   "🥗", "Hot Pot": "🫕", "Western": "🥩",
@@ -80,7 +83,7 @@ def build_state(budget_rem, cal_rem, days_rem, meals_rem,
                 fatigue, meal_time_idx, day_idx,
                 time_since_last, is_weekend,
                 pref_weights, avg_price_pref, consec_churns):
-    """Construct the 25-dim state vector."""
+    """Construct the 24-dim state vector."""
     group_a = np.array([
         budget_rem, cal_rem,
         days_rem / N_DAYS, meals_rem / MAX_STEPS
@@ -102,25 +105,50 @@ def build_state(budget_rem, cal_rem, days_rem, meals_rem,
 # ── Environment ────────────────────────────────────────────────────────────
 class TasteFlowEnv:
     def __init__(self, weekly_budget=50.0, weekly_calories=10000,
-                 user_profile=None):
-        self.weekly_budget   = weekly_budget
-        self.weekly_calories = weekly_calories
-        self.user_profile    = user_profile or UserProfile()
+                 user_profile=None,
+                 use_r_goal=True, use_terminal_reward=True,
+                 use_fatigue_dynamics=True):
+        """
+        Ablation flags (all True = full TasteFlow MDP):
+          use_r_goal           : include r_budget + r_calorie + r_variety shaping
+          use_terminal_reward  : add ±5..±50 terminal bonus at episode end
+          use_fatigue_dynamics : per-category fatigue accumulates and decays
+        """
+        self.weekly_budget        = weekly_budget
+        self.weekly_calories      = weekly_calories
+        self.user_profile         = user_profile or UserProfile()
+        self.use_r_goal           = use_r_goal
+        self.use_terminal_reward  = use_terminal_reward
+        self.use_fatigue_dynamics = use_fatigue_dynamics
         self.reset()
 
     # ── reset ──
     def reset(self):
-        self.step_idx         = 0
-        self.budget_spent     = 0.0
-        self.calories_eaten   = 0
-        self.fatigue          = [0.0] * N_CAT
-        self.consec_churns    = 0
-        self.meal_history     = []          # list of category indices
-        self.pref_weights     = list(self.user_profile.init_prefs)
-        self.avg_price_pref   = 12.0
-        self.log              = []          # list of step dicts
-        self.done             = False
+        self.step_idx              = 0
+        self.budget_spent          = 0.0
+        self.calories_eaten        = 0
+        self.fatigue               = [0.0] * N_CAT
+        self.consec_churns         = 0
+        self.meal_history          = []          # list of category indices
+        self.pref_weights          = list(self.user_profile.init_prefs)
+        self.avg_price_pref        = 12.0
+        self.log                   = []          # list of step dicts
+        self.done                  = False
+        self.last_accept_clock_h   = None        # absolute hour of last accepted meal
         return self._get_state()
+
+    # absolute clock hour for a given step index (day*24 + meal_hour)
+    def _clock_hour(self, step_idx):
+        d   = step_idx // N_MEALS_DAY
+        mt  = step_idx %  N_MEALS_DAY
+        return d * 24 + MEAL_HOURS[mt]
+
+    def _time_since_last(self):
+        """Hours since last accepted meal (0 if first meal, capped at 24)."""
+        if self.last_accept_clock_h is None:
+            return 12.0   # neutral default before any acceptance
+        now_h = self._clock_hour(self.step_idx)
+        return float(min(max(now_h - self.last_accept_clock_h, 0), 24))
 
     # ── step ──
     def step(self, action_idx):
@@ -166,13 +194,14 @@ class TasteFlowEnv:
                    -2.0 if len(recent3) == 3 and all(c == cat_idx for c in recent3) else 0.0
 
         r_goal  = 0.4 * r_budget + 0.3 * r_calorie + 0.3 * r_variety
-        reward  = r_accept + r_goal
+        reward  = r_accept + (r_goal if self.use_r_goal else 0.0)
 
         # state updates
         if response in ("accept", "accept_browse"):
             self.budget_spent   += meal["price"]
             self.calories_eaten += meal["calories"]
             self.meal_history.append(cat_idx)
+            self.last_accept_clock_h = self._clock_hour(self.step_idx)
             # update pref weights (EMA)
             alpha = 0.1
             self.pref_weights[cat_idx] = (
@@ -186,11 +215,12 @@ class TasteFlowEnv:
             self.consec_churns += 1
         self.user_profile.record_feedback(meal, response)
 
-        # fatigue decay + update
-        for i in range(N_CAT):
-            self.fatigue[i] *= FATIGUE_DECAY
-        if response in ("accept", "accept_browse"):
-            self.fatigue[cat_idx] = min(self.fatigue[cat_idx] + 1.0, 3.0)
+        # fatigue dynamics (decay + update on accept) — disabled in ablation
+        if self.use_fatigue_dynamics:
+            for i in range(N_CAT):
+                self.fatigue[i] *= FATIGUE_DECAY
+            if response in ("accept", "accept_browse"):
+                self.fatigue[cat_idx] = min(self.fatigue[cat_idx] + 1.0, 3.0)
 
         # terminal reward
         r_terminal = 0.0
@@ -211,6 +241,8 @@ class TasteFlowEnv:
                 r_terminal = 5.0
             else:
                 r_terminal = -30.0
+            if not self.use_terminal_reward:
+                r_terminal = 0.0
             reward += r_terminal
             self.log[-1]["r_terminal"] = r_terminal
             self.log[-1]["reward"]    += r_terminal
@@ -231,7 +263,7 @@ class TasteFlowEnv:
             fatigue      = self.fatigue,
             meal_time_idx= mt_idx,
             day_idx      = day_idx,
-            time_since_last = 4.0,
+            time_since_last = self._time_since_last(),
             is_weekend   = day_idx >= 5,
             pref_weights = self.pref_weights,
             avg_price_pref = self.avg_price_pref,

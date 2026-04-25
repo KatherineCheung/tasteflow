@@ -4,10 +4,10 @@ Agents:
   - RuleBasedAgent   : recency + variety heuristic (no learning)
   - LinUCBAgent      : contextual bandit (Section 2 comparison)
   - PPOAgent         : full MDP agent (from-scratch NumPy PPO)
-  - CPOAgent         : Constrained Policy Optimization via Primal-Dual method
-                       Treats budget + calorie limits as hard Lagrangian constraints,
-                       not soft reward bonuses. Provably satisfies constraints at
-                       convergence while maximising acceptance reward.
+  - CPOAgent         : Constrained RL via Primal-Dual (Lagrangian) method
+                       Treats budget + calorie limits as Lagrangian constraints,
+                       not soft reward bonuses. Multipliers adapt online to
+                       enforce constraints while maximising acceptance reward.
 """
 
 import numpy as np
@@ -179,7 +179,8 @@ class PPOAgent:
 
     def __init__(self, state_dim=STATE_DIM, n_actions=N_ACTIONS,
                  lr=3e-3, gamma=0.95, clip_eps=0.2,
-                 entropy_coef=0.01, n_epochs=4):
+                 entropy_coef=0.01, n_epochs=4,
+                 n_episodes_per_update=4):
         self.state_dim    = state_dim
         self.n_actions    = n_actions
         self.lr           = lr
@@ -187,6 +188,7 @@ class PPOAgent:
         self.clip_eps     = clip_eps
         self.entropy_coef = entropy_coef
         self.n_epochs     = n_epochs
+        self.n_episodes_per_update = n_episodes_per_update
 
         # ── network weights (Xavier init) ──
         def xavier(fan_in, fan_out):
@@ -256,9 +258,11 @@ class PPOAgent:
         probs  = self._policy(logits, valid_actions)
         return np.log(probs[action] + 1e-8)
 
-    # ── update (PPO clip objective) ──
+    # ── update (PPO clip objective with proper gradient) ──
     def update(self, *args, **kwargs):
-        if len(self.buf_states) < 10:
+        # Gate on number of completed episodes (multi-episode batching)
+        n_completed_eps = int(np.sum(np.array(self.buf_dones) > 0.5))
+        if n_completed_eps < self.n_episodes_per_update or len(self.buf_states) < 10:
             return {}
 
         states   = np.array(self.buf_states,   dtype=np.float32)
@@ -268,72 +272,85 @@ class PPOAgent:
         dones    = np.array(self.buf_dones,    dtype=np.float32)
         masks    = self.buf_masks
 
-        # ── compute returns (discounted) ──
+        # ── compute discounted returns (resets on episode boundary) ──
         returns = np.zeros_like(rewards)
         G = 0.0
         for t in reversed(range(len(rewards))):
             G = rewards[t] + self.gamma * G * (1 - dones[t])
             returns[t] = G
 
-        # normalise returns
         returns = (returns - returns.mean()) / (returns.std() + 1e-8)
 
-        # ── PPO update (n_epochs passes) ──
+        eps = self.clip_eps
         total_loss = 0.0
+
         for _ in range(self.n_epochs):
             for t in range(len(states)):
-                s  = states[t]
-                a  = actions[t]
-                G  = returns[t]
-                m  = masks[t]
+                s   = states[t]
+                a   = actions[t]
+                Gt  = returns[t]
+                m   = masks[t]
+                old = old_lps[t]
 
+                # forward
                 h1, h2, logits, value = self._forward(s)
-                probs = self._policy(logits, m)
-                new_lp = np.log(probs[a] + 1e-8)
+                probs   = self._policy(logits, m)
+                new_lp  = np.log(probs[a] + 1e-8)
 
-                # advantage
-                adv = G - value
+                # advantage (Monte-Carlo - V baseline)
+                adv = Gt - value
 
-                # clipped ratio
-                ratio    = np.exp(new_lp - old_lps[t])
-                clip_r   = np.clip(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
-                actor_l  = -min(ratio * adv, clip_r * adv)
+                # PPO ratio and clipped surrogate
+                ratio  = float(np.exp(new_lp - old))
+                clip_r = float(np.clip(ratio, 1 - eps, 1 + eps))
+                unclipped = ratio  * adv
+                clipped   = clip_r * adv
+                actor_l   = -min(unclipped, clipped)
 
-                # value loss
-                critic_l = (G - value) ** 2
-
-                # entropy bonus
-                entropy  = -np.sum(probs * np.log(probs + 1e-8))
+                # critic + entropy
+                critic_l = (Gt - value) ** 2
+                entropy  = float(-np.sum(probs * np.log(probs + 1e-8)))
                 loss     = actor_l + 0.5 * critic_l - self.entropy_coef * entropy
                 total_loss += loss
 
-                # ── backprop (manual chain rule) ──
+                # ── proper PPO-clip gradient ──
+                # Gradient flows through `ratio` only when the unclipped term
+                # is the binding one. When clipped on the wrong side, gradient = 0.
+                use_unclipped = (unclipped <= clipped)
+                in_clip_zone  = ((adv > 0 and ratio > 1 + eps) or
+                                 (adv < 0 and ratio < 1 - eps))
+                grad_coef = ratio if (use_unclipped or not in_clip_zone) else 0.0
+
+                # one-hot for chosen action
+                one_hot_a = np.zeros(self.n_actions);  one_hot_a[a] = 1.0
+                # dLoss/d_logits from actor: grad_coef * adv * (probs - one_hot)
+                dlogits_actor = grad_coef * adv * (probs - one_hot_a)
+
+                # entropy gradient: dLoss/d_logits from -beta*H
+                #   dH/d_logits[j] = -p_j * (log p_j + H)
+                #   dLoss/d_logits[j] = -beta * dH/d_logits[j] = beta * p_j * (log p_j + H)
+                dlogits_entropy = self.entropy_coef * probs * (np.log(probs + 1e-8) + entropy)
+
+                dlogits = dlogits_actor + dlogits_entropy
+
                 # value head gradient
-                dv   = 2 * (value - G)             # dL/d_value
-                dWv  = dv * h2.reshape(1, -1)
-                dbv  = np.array([dv])
+                dv  = 2 * (value - Gt)
+                dWv = dv * h2.reshape(1, -1)
+                dbv = np.array([dv])
 
-                # policy head gradient (approximate — REINFORCE-style for simplicity)
-                dlogp     = np.zeros(self.n_actions)
-                dlogp[a]  = -adv / (probs[a] + 1e-8)
-                # softmax jacobian diagonal approx
-                dlogits   = probs * (dlogp - (probs * dlogp).sum())
-                dWp       = np.outer(dlogits, h2)
-                dbp       = dlogits
+                # policy head gradient
+                dWp = np.outer(dlogits, h2)
+                dbp = dlogits
 
-                # shared trunk gradients
-                dh2_from_p = self.Wp.T @ dlogits
-                dh2_from_v = self.Wv.T * dv
-                dh2        = (dh2_from_p + dh2_from_v.flatten()) * (1 - h2**2)
+                # shared trunk
+                dh2_p = self.Wp.T @ dlogits
+                dh2_v = self.Wv.T * dv
+                dh2   = (dh2_p + dh2_v.flatten()) * (1 - h2**2)
+                dW2   = np.outer(dh2, h1);  db2 = dh2
 
-                dW2  = np.outer(dh2, h1)
-                db2  = dh2
+                dh1 = (self.W2.T @ dh2) * (1 - h1**2)
+                dW1 = np.outer(dh1, s);    db1 = dh1
 
-                dh1  = (self.W2.T @ dh2) * (1 - h1**2)
-                dW1  = np.outer(dh1, s)
-                db1  = dh1
-
-                # ── gradient step (clip gradients for stability) ──
                 def clip(g, c=1.0):
                     n = np.linalg.norm(g)
                     return g * (c / n) if n > c else g
@@ -351,7 +368,11 @@ class PPOAgent:
         self.buf_rewards.clear(); self.buf_logprobs.clear()
         self.buf_dones.clear();  self.buf_masks.clear()
 
-        return {"loss": total_loss / max(len(states) * self.n_epochs, 1)}
+        return {
+            "loss":   total_loss / max(len(states) * self.n_epochs, 1),
+            "n_eps":  n_completed_eps,
+            "steps":  len(states),
+        }
 
 
 # ── CPO Agent (Constrained Policy Optimization — Primal-Dual) ─────────────
@@ -382,10 +403,10 @@ class CPOAgent:
     constraint violation) — they grow large when constraints are violated,
     automatically penalising the policy harder until it complies.
 
-    At convergence the KKT conditions guarantee:
-        λ_b* · (C_b - d_b) = 0    (complementary slackness)
-    meaning either the constraint is satisfied OR the multiplier is zero,
-    never both violated simultaneously.
+    At convergence the KKT conditions imply complementary slackness:
+        λ_b* · (C_b - d_b) = 0
+    meaning either the constraint is satisfied OR the multiplier is zero.
+    In practice, convergence depends on learning rates and training length.
 
     Architecture
     ------------
@@ -402,10 +423,11 @@ class CPOAgent:
     CALORIE_LIMIT = 0.95   # allow up to 95% of calorie allowance
 
     def __init__(self, state_dim=STATE_DIM, n_actions=N_ACTIONS,
-                 lr_policy=3e-3, lr_lambda=1e-2,
+                 lr_policy=3e-3, lr_lambda=5e-2,
                  gamma=0.95, clip_eps=0.2,
                  entropy_coef=0.01, n_epochs=4,
-                 lambda_init=0.1, lambda_max=10.0):
+                 lambda_init=0.1, lambda_max=50.0,
+                 n_episodes_per_update=4):
 
         self.state_dim    = state_dim
         self.n_actions    = n_actions
@@ -416,6 +438,7 @@ class CPOAgent:
         self.entropy_coef = entropy_coef
         self.n_epochs     = n_epochs
         self.lambda_max   = lambda_max
+        self.n_episodes_per_update = n_episodes_per_update
 
         # ── Lagrange multipliers (one per constraint) ──────────────────
         # Initialised to a small positive value.
@@ -450,6 +473,9 @@ class CPOAgent:
         self.buf_masks          = []
         self.buf_budget_costs   = []   # fraction of budget spent this step
         self.buf_calorie_costs  = []   # fraction of calories consumed this step
+        # Per-episode aggregates accumulated across the multi-episode batch
+        self.pending_b_fracs    = []
+        self.pending_c_fracs    = []
 
         self.update_count = 0
 
@@ -511,76 +537,114 @@ class CPOAgent:
     # ── Update: policy step + Lagrange multiplier step ────────────────────
     def update(self, episode_budget_fraction=None, episode_calorie_fraction=None):
         """
-        Two-phase update:
+        Two-timescale primal-dual update:
 
-        Phase 1 — Policy update (PPO-clip on r_accept only):
-            The Lagrange multipliers enter as a PENALTY on constraint costs,
-            augmenting the effective reward seen by the actor:
+        FAST (every episode) — Multiplier update:
+            EMA_b ← (1-α)·EMA_b + α·budget_fraction_this_ep
+            λ_b   ← clip(λ_b + lr_λ · (EMA_b - d_b),  0, λ_max)
+            (analogous for calories)
 
-            r_augmented_t = r_accept_t
-                          - λ_b  · budget_cost_t
-                          - λ_c  · calorie_cost_t
+        SLOW (every n_episodes_per_update episodes) — Policy update:
+            r_augmented_t = r_accept_t - λ_b·budget_cost_t - λ_c·calorie_cost_t
+            PPO-clip surrogate with proper gradient.
 
-            This is the Lagrangian penalty inline: high λ means the actor
-            is strongly penalised for recommending expensive/caloric meals.
-
-        Phase 2 — Multiplier update (gradient ascent on constraint violation):
-            λ_b  ← clip(λ_b  + lr_λ · (C_b  - d_b),  0, λ_max)
-            λ_c  ← clip(λ_c  + lr_λ · (C_c  - d_c),  0, λ_max)
-
-            where C_b = EMA of budget_fraction over recent episodes.
-            If C_b > d_b (budget violated) → λ_b increases → actor penalised harder.
-            If C_b < d_b (budget satisfied) → λ_b decreases → actor has more freedom.
+        Multi-timescale ordering matters: dual must adapt faster than the
+        policy or it cannot keep up with policy drift.
         """
-        if len(self.buf_states) < 5:
-            return {}
+        # ── FAST: dual variable (λ) update every episode ─────────────
+        if episode_budget_fraction is not None:
+            self.pending_b_fracs.append(float(episode_budget_fraction))
+            self.pending_c_fracs.append(float(episode_calorie_fraction))
 
-        states        = np.array(self.buf_states,       dtype=np.float32)
-        actions       = np.array(self.buf_actions,      dtype=int)
-        r_accepts     = np.array(self.buf_r_accept,     dtype=np.float32)
-        old_lps       = np.array(self.buf_logprobs,     dtype=np.float32)
-        dones         = np.array(self.buf_dones,        dtype=np.float32)
-        masks         = self.buf_masks
-        b_costs       = np.array(self.buf_budget_costs, dtype=np.float32)
-        c_costs       = np.array(self.buf_calorie_costs,dtype=np.float32)
+            self.ema_budget_cost  = ((1 - self.ema_alpha) * self.ema_budget_cost
+                                     + self.ema_alpha * float(episode_budget_fraction))
+            self.ema_calorie_cost = ((1 - self.ema_alpha) * self.ema_calorie_cost
+                                     + self.ema_alpha * float(episode_calorie_fraction))
 
-        # ── Augmented reward: r_accept - λ_b·C_b - λ_c·C_c ───────────
+            budget_violation  = self.ema_budget_cost  - self.BUDGET_LIMIT
+            calorie_violation = self.ema_calorie_cost - self.CALORIE_LIMIT
+
+            self.lambda_budget = float(np.clip(
+                self.lambda_budget  + self.lr_lambda * budget_violation,
+                0.0, self.lambda_max))
+            self.lambda_calorie = float(np.clip(
+                self.lambda_calorie + self.lr_lambda * calorie_violation,
+                0.0, self.lambda_max))
+
+            self.lambda_budget_history.append(self.lambda_budget)
+            self.lambda_calorie_history.append(self.lambda_calorie)
+
+        # Gate SLOW (policy) update on completed-episode count
+        n_completed_eps = int(np.sum(np.array(self.buf_dones) > 0.5))
+        if n_completed_eps < self.n_episodes_per_update or len(self.buf_states) < 5:
+            return {
+                "lambda_budget":  self.lambda_budget,
+                "lambda_calorie": self.lambda_calorie,
+                "policy_updated": False,
+            }
+
+        states    = np.array(self.buf_states,       dtype=np.float32)
+        actions   = np.array(self.buf_actions,      dtype=int)
+        r_accepts = np.array(self.buf_r_accept,     dtype=np.float32)
+        old_lps   = np.array(self.buf_logprobs,     dtype=np.float32)
+        dones     = np.array(self.buf_dones,        dtype=np.float32)
+        masks     = self.buf_masks
+        b_costs   = np.array(self.buf_budget_costs, dtype=np.float32)
+        c_costs   = np.array(self.buf_calorie_costs,dtype=np.float32)
+
+        # Lagrangian-augmented step reward
         r_augmented = (r_accepts
                        - self.lambda_budget  * b_costs
                        - self.lambda_calorie * c_costs)
 
-        # ── Compute discounted returns on augmented reward ─────────────
+        # Discounted returns (resets at episode boundary via dones).
+        # NOTE: we DO NOT z-normalise here — normalisation would erase the
+        # absolute scale of the Lagrangian penalty (-λ·cost) relative to
+        # r_accept, killing the dual signal. We instead centre by subtracting
+        # the mean to reduce variance, but keep the original scale.
         returns = np.zeros_like(r_augmented)
         G = 0.0
         for t in reversed(range(len(r_augmented))):
             G = r_augmented[t] + self.gamma * G * (1 - dones[t])
             returns[t] = G
-        returns = (returns - returns.mean()) / (returns.std() + 1e-8)
+        returns = returns - returns.mean()
 
-        # ── Phase 1: PPO-clip policy update ───────────────────────────
+        eps = self.clip_eps
+
+        # ── Phase 1: PPO-clip policy update with proper gradient ──────
         for _ in range(self.n_epochs):
             for t in range(len(states)):
-                s  = states[t];  a = actions[t];  G = returns[t];  m = masks[t]
+                s   = states[t];  a = actions[t];  Gt = returns[t];  m = masks[t]
+                old = old_lps[t]
+
                 h1, h2, logits, value = self._forward(s)
                 probs  = self._policy(logits, m)
                 new_lp = np.log(probs[a] + 1e-8)
 
-                adv    = G - value
-                ratio  = np.exp(new_lp - old_lps[t])
-                clip_r = np.clip(ratio, 1 - self.clip_eps, 1 + self.clip_eps)
-                actor_l  = -min(ratio * adv, clip_r * adv)
-                critic_l = (G - value) ** 2
-                entropy  = -np.sum(probs * np.log(probs + 1e-8))
-                loss     = actor_l + 0.5 * critic_l - self.entropy_coef * entropy
+                adv    = Gt - value
+                ratio  = float(np.exp(new_lp - old))
+                clip_r = float(np.clip(ratio, 1 - eps, 1 + eps))
+                unclipped = ratio  * adv
+                clipped   = clip_r * adv
+                actor_l   = -min(unclipped, clipped)
+                critic_l  = (Gt - value) ** 2
+                entropy   = float(-np.sum(probs * np.log(probs + 1e-8)))
+                loss      = actor_l + 0.5*critic_l - self.entropy_coef*entropy
 
-                # backprop (same as PPO)
-                dv   = 2 * (value - G)
-                dWv  = dv * h2.reshape(1, -1);  dbv = np.array([dv])
+                # Proper PPO-clip gradient
+                use_unclipped = (unclipped <= clipped)
+                in_clip_zone  = ((adv > 0 and ratio > 1 + eps) or
+                                 (adv < 0 and ratio < 1 - eps))
+                grad_coef = ratio if (use_unclipped or not in_clip_zone) else 0.0
 
-                dlogp        = np.zeros(self.n_actions)
-                dlogp[a]     = -adv / (probs[a] + 1e-8)
-                dlogits      = probs * (dlogp - (probs * dlogp).sum())
-                dWp          = np.outer(dlogits, h2);  dbp = dlogits
+                one_hot_a = np.zeros(self.n_actions);  one_hot_a[a] = 1.0
+                dlogits_actor   = grad_coef * adv * (probs - one_hot_a)
+                dlogits_entropy = self.entropy_coef * probs * (np.log(probs + 1e-8) + entropy)
+                dlogits = dlogits_actor + dlogits_entropy
+
+                dv  = 2 * (value - Gt)
+                dWv = dv * h2.reshape(1, -1);  dbv = np.array([dv])
+                dWp = np.outer(dlogits, h2);   dbp = dlogits
 
                 dh2_p = self.Wp.T @ dlogits
                 dh2_v = self.Wv.T * dv
@@ -600,56 +664,20 @@ class CPOAgent:
                 self.Wp -= lr*clip_grad(dWp); self.bp -= lr*clip_grad(dbp)
                 self.Wv -= lr*clip_grad(dWv); self.bv -= lr*clip_grad(dbv)
 
-        # ── Phase 2: Lagrange multiplier update ───────────────────────
-        # Update EMA of constraint costs using this episode's fractions
-        if episode_budget_fraction is not None:
-            self.ema_budget_cost = (
-                (1 - self.ema_alpha) * self.ema_budget_cost
-                + self.ema_alpha * episode_budget_fraction
-            )
-            self.ema_calorie_cost = (
-                (1 - self.ema_alpha) * self.ema_calorie_cost
-                + self.ema_alpha * episode_calorie_fraction
-            )
-        else:
-            # Fallback: use mean step costs from this buffer
-            self.ema_budget_cost = (
-                (1 - self.ema_alpha) * self.ema_budget_cost
-                + self.ema_alpha * float(b_costs.sum())
-            )
-            self.ema_calorie_cost = (
-                (1 - self.ema_alpha) * self.ema_calorie_cost
-                + self.ema_alpha * float(c_costs.sum())
-            )
-
-        # Gradient ascent: λ increases when constraint violated, decreases when safe
-        budget_violation  = self.ema_budget_cost  - self.BUDGET_LIMIT
-        calorie_violation = self.ema_calorie_cost - self.CALORIE_LIMIT
-
-        self.lambda_budget = float(np.clip(
-            self.lambda_budget  + self.lr_lambda * budget_violation,
-            0.0, self.lambda_max
-        ))
-        self.lambda_calorie = float(np.clip(
-            self.lambda_calorie + self.lr_lambda * calorie_violation,
-            0.0, self.lambda_max
-        ))
-
-        # Track for visualisation
-        self.lambda_budget_history.append(self.lambda_budget)
-        self.lambda_calorie_history.append(self.lambda_calorie)
-
         self.update_count += 1
 
-        # Clear buffer
+        # Clear buffers (λ and EMA already updated in fast loop above)
         self.buf_states.clear();        self.buf_actions.clear()
         self.buf_r_accept.clear();      self.buf_logprobs.clear()
         self.buf_dones.clear();         self.buf_masks.clear()
         self.buf_budget_costs.clear();  self.buf_calorie_costs.clear()
+        self.pending_b_fracs.clear();   self.pending_c_fracs.clear()
 
         return {
-            "lambda_budget":  self.lambda_budget,
-            "lambda_calorie": self.lambda_calorie,
-            "budget_violation":  budget_violation,
-            "calorie_violation": calorie_violation,
+            "lambda_budget":     self.lambda_budget,
+            "lambda_calorie":    self.lambda_calorie,
+            "ema_budget":        self.ema_budget_cost,
+            "ema_calorie":       self.ema_calorie_cost,
+            "n_eps":             n_completed_eps,
+            "policy_updated":    True,
         }
