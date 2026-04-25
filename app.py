@@ -405,6 +405,84 @@ def make_trained_cpo(weights):
     return agent
 
 
+ALL_MEAL_TAGS = sorted({tag for meal in MEALS for tag in meal.get("tags", [])})
+
+
+def get_policy_probs(agent, state, valid_actions):
+    """Return an action-probability vector for both neural and baseline agents."""
+    if hasattr(agent, "get_action_probs"):
+        return agent.get_action_probs(state, valid_actions)
+
+    probs = np.zeros(len(MEALS), dtype=float)
+    if hasattr(agent, "Q"):
+        q_vals = np.array([agent.Q[i] for i in valid_actions], dtype=float)
+        q_vals = q_vals - q_vals.max()
+        exp_q = np.exp(q_vals)
+        base = exp_q / max(exp_q.sum(), 1e-8)
+        if hasattr(agent, "epsilon"):
+            base = (1 - agent.epsilon) * base + agent.epsilon / len(valid_actions)
+        for idx, action in enumerate(valid_actions):
+            probs[action] = base[idx]
+    else:
+        for action in valid_actions:
+            probs[action] = 1.0 / len(valid_actions)
+    return probs
+
+
+def build_user_profile(config):
+    intent = config["intent"]
+    budget_sensitivity = 0.5
+    calorie_sensitivity = 0.3
+    preferred_tags = set(config["preferred_tags"])
+
+    if intent == "Save money":
+        budget_sensitivity = 0.9
+        preferred_tags.add("budget")
+    elif intent == "Eat healthier":
+        calorie_sensitivity = 0.75
+        preferred_tags.update(["healthy", "light", "balanced"])
+    elif intent == "Quick meal":
+        preferred_tags.add("quick")
+    elif intent == "High protein":
+        preferred_tags.add("high-protein")
+    elif intent == "Comfort food":
+        preferred_tags.add("comfort")
+
+    return UserProfile(
+        preferred_cat=config["preferred_cat"],
+        budget_sensitivity=budget_sensitivity,
+        calorie_sensitivity=calorie_sensitivity,
+        fatigue_sensitivity=0.6,
+        noise=0.08,
+        preferred_tags=sorted(preferred_tags),
+        avoided_tags=config["avoided_tags"],
+        disliked_cats=config["disliked_cats"],
+        max_price=config["max_price"],
+        max_calories_per_meal=config["max_calories_per_meal"],
+    )
+
+
+def explain_recommendation(meal, env, prob):
+    tags = ", ".join(meal.get("tags", [])[:3])
+    meals_left = max(21 - env.step_idx, 1)
+    budget_pace = (env.weekly_budget - env.budget_spent) / meals_left
+    calorie_pace = (env.weekly_calories - env.calories_eaten) / meals_left
+    cat_idx = CATEGORIES.index(meal["category"])
+    reasons = [
+        f"policy confidence {prob * 100:.1f}%",
+        f"{meal['category']} matches your current preference vector",
+    ]
+    if meal["price"] <= budget_pace:
+        reasons.append("within today's budget pace")
+    if meal["calories"] <= calorie_pace:
+        reasons.append("within calorie pace")
+    if env.fatigue[cat_idx] <= 1.0:
+        reasons.append("low category fatigue")
+    if tags:
+        reasons.append(f"tags: {tags}")
+    return " · ".join(reasons)
+
+
 # ── Sidebar ────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("### 🍜 TasteFlow")
@@ -432,7 +510,7 @@ with st.sidebar:
     if mode == "🎮 Be the User" and "game_env" in st.session_state:
         env_s = st.session_state.game_env
         cur_day = min(env_s.step_idx // len(MEAL_TIMES), 6) + 1
-        budget_left_s = max(200 - env_s.budget_spent, 0)
+        budget_left_s = max(env_s.weekly_budget - env_s.budget_spent, 0)
         s1, s2 = st.columns(2)
         s1.metric("Reward", f"{st.session_state.cumulative_r:+.1f}")
         s2.metric("Day", f"{cur_day} / 7")
@@ -574,14 +652,14 @@ if mode == "📊 Watch the Agent Learn":
                 error_y=dict(type="data", array=stds, color="rgba(15,23,42,0.25)"),
                 marker_color=colors,
                 text=[f"{v:+.1f}" for v in rews],
-                textposition="outside",
+                textposition=["inside" if n == baseline else "outside" for n in agent_names],
+                insidetextanchor="end",
+                cliponaxis=False,
                 hovertemplate="<b>%{x}</b><br>Reward: %{y:.1f}<extra></extra>",
             ))
             fig_r.add_hline(
                 y=base["mean_reward"],
                 line_dash="dash", line_color="#94A3B8", line_width=1.5,
-                annotation_text=f"Random baseline ({base['mean_reward']:.1f})",
-                annotation_font_color="#475569", annotation_position="top left",
             )
             fig_r.update_layout(**PLOTLY_LAYOUT, height=320, showlegend=False,
                 xaxis=dict(**GRID),
@@ -589,6 +667,7 @@ if mode == "📊 Watch the Agent Learn":
                 margin=dict(t=20, b=20, l=60, r=20),
             )
             st.plotly_chart(fig_r, use_container_width=True)
+            st.caption(f"Dashed line marks the Random baseline ({base['mean_reward']:.1f}).")
 
             # ── 2. Full comparison table — sticky first col + horizontal scroll ──
             st.markdown("#### Full Comparison Table — % Gain vs Random Baseline")
@@ -1135,21 +1214,82 @@ elif mode == "🎮 Be the User":
     use_greedy  = "Greedy"   in agent_choice and "ε" not in agent_choice
     use_egreedy = "ε-Greedy" in agent_choice
 
+    with st.expander("🍽️ Personalize this demo user", expanded=True):
+        pcol1, pcol2, pcol3 = st.columns(3)
+        with pcol1:
+            preferred_cat = st.selectbox(
+                "Favorite cuisine",
+                CATEGORIES,
+                index=CATEGORIES.index("Japanese"),
+            )
+            intent = st.selectbox(
+                "Today's intent",
+                ["Balanced week", "Save money", "Eat healthier",
+                 "Quick meal", "High protein", "Comfort food"],
+            )
+        with pcol2:
+            weekly_budget = st.slider("Weekly budget", 120, 320, 200, step=10)
+            max_price = st.slider("Max price per meal", 8, 30, 25, step=1)
+        with pcol3:
+            weekly_calories = st.slider("Weekly calories", 12000, 24000, 18000, step=1000)
+            max_calories_per_meal = st.slider("Max calories per meal", 450, 1200, 1050, step=50)
+
+        preferred_tags = st.multiselect(
+            "Taste or lifestyle tags you like",
+            ALL_MEAL_TAGS,
+            default=["healthy", "comfort"],
+        )
+        fcol1, fcol2 = st.columns(2)
+        with fcol1:
+            avoided_tags = st.multiselect(
+                "Hard filters: avoid tags",
+                ALL_MEAL_TAGS,
+                default=[],
+            )
+        with fcol2:
+            disliked_cats = st.multiselect(
+                "Hard filters: avoid cuisines",
+                [c for c in CATEGORIES if c != preferred_cat],
+                default=[],
+            )
+
+        profile_config = {
+            "preferred_cat": preferred_cat,
+            "intent": intent,
+            "weekly_budget": weekly_budget,
+            "weekly_calories": weekly_calories,
+            "max_price": max_price,
+            "max_calories_per_meal": max_calories_per_meal,
+            "preferred_tags": tuple(sorted(preferred_tags)),
+            "avoided_tags": tuple(sorted(avoided_tags)),
+            "disliked_cats": tuple(sorted(disliked_cats)),
+        }
+        st.caption(
+            "These choices become the initial MDP state and action mask; "
+            "the recommender still selects from its learned policy."
+        )
+
     # ── Initialize / reset session ──
     reset_needed = (
         "game_env" not in st.session_state
         or st.session_state.get("game_reset")
         or st.session_state.get("game_agent_type") != agent_choice
+        or st.session_state.get("game_profile_config") != profile_config
     )
     if reset_needed:
-        profile = UserProfile("Japanese")
-        st.session_state.game_env        = TasteFlowEnv(200, 18000, profile)
+        profile = build_user_profile(profile_config)
+        st.session_state.game_env        = TasteFlowEnv(
+            profile_config["weekly_budget"],
+            profile_config["weekly_calories"],
+            profile,
+        )
         st.session_state.game_state      = st.session_state.game_env.reset()
         st.session_state.game_log        = []
         st.session_state.cumulative_r    = 0.0
         st.session_state.game_done       = False
         st.session_state.game_reset      = False
         st.session_state.game_agent_type = agent_choice
+        st.session_state.game_profile_config = profile_config
         st.session_state.ppo_agent       = make_trained_ppo(data["ppo_weights"])
         st.session_state.greedy_agent    = GreedyAgent()
         st.session_state.egreedy_agent   = EpsilonGreedyAgent(epsilon=0.1)
@@ -1179,16 +1319,18 @@ elif mode == "🎮 Be the User":
 
     if not st.session_state.game_done:
         valid  = env.get_valid_actions()
-        probs  = agent.get_action_probs(s, valid)
+        probs  = get_policy_probs(agent, s, valid)
         action = valid[int(np.argmax([probs[i] for i in valid]))]
         meal   = MEALS[action]
         cat_idx    = CATEGORIES.index(meal["category"])
         fatigue_v  = env.fatigue[cat_idx]
-        budget_rem = 200 - env.budget_spent
-        cal_rem    = 18000 - env.calories_eaten
+        budget_rem = env.weekly_budget - env.budget_spent
+        cal_rem    = env.weekly_calories - env.calories_eaten
+        rec_reason = explain_recommendation(meal, env, probs[action])
     else:
         meal = None
         fatigue_v = 0.0
+        rec_reason = ""
 
     # ── Two-column layout: phone left, analyst right ──
     phone_col, analyst_col = st.columns([1, 2], gap="large")
@@ -1239,10 +1381,10 @@ elif mode == "🎮 Be the User":
 
         else:
             # ── Status bar: Day · Meal · Reward (inline, no truncation) ──
-            budget_left = max(200 - env.budget_spent, 0)
-            cal_left    = max(18000 - env.calories_eaten, 0)
-            budget_pct  = min(env.budget_spent / 200 * 100, 100)
-            cal_pct     = min(env.calories_eaten / 18000 * 100, 100)
+            budget_left = max(env.weekly_budget - env.budget_spent, 0)
+            cal_left    = max(env.weekly_calories - env.calories_eaten, 0)
+            budget_pct  = min(env.budget_spent / env.weekly_budget * 100, 100)
+            cal_pct     = min(env.calories_eaten / env.weekly_calories * 100, 100)
 
             st.markdown(f"""
 <div class="phone-statusbar">
@@ -1251,9 +1393,9 @@ elif mode == "🎮 Be the User":
   <span>⭐ <b style="color:var(--primary)">{st.session_state.cumulative_r:+.1f}</b></span>
 </div>
 <div class="phone-progress">
-  <div>💰 <b>${budget_left:.0f}</b> <span>/ $200</span>
+  <div>💰 <b>${budget_left:.0f}</b> <span>/ ${env.weekly_budget:.0f}</span>
        <div class="bar"><span style="width:{budget_pct:.0f}%;background:var(--primary)"></span></div></div>
-  <div>🔥 <b>{cal_left:,}</b> <span>/ 18k</span>
+  <div>🔥 <b>{cal_left:,.0f}</b> <span>/ {env.weekly_calories:,.0f}</span>
        <div class="bar"><span style="width:{cal_pct:.0f}%;background:#7C3AED"></span></div></div>
 </div>
 """, unsafe_allow_html=True)
@@ -1276,6 +1418,9 @@ elif mode == "🎮 Be the User":
     <span class="pill pill-money">💰 ${meal['price']}</span>
     <span class="pill pill-cal">🔥 {meal['calories']} kcal</span>
     <span class="pill {fa_class}">😮‍💨 {fatigue_v:.1f}</span>
+  </div>
+  <div style="font-size:.72rem;color:var(--text-mute);line-height:1.35;margin-top:10px">
+    Why this: {rec_reason}
   </div>
 </div>
 """, unsafe_allow_html=True)
@@ -1414,21 +1559,32 @@ including soft goal bonuses. Best at long-horizon pacing.
             # ── Why did the agent pick this? ──
             with st.expander("🧠 Agent reasoning — top-3 probabilities + state pace",
                              expanded=True):
+                st.markdown(
+                    f"**Personalized state:** prefers **{env.user_profile.preferred_cat}**, "
+                    f"intent **{profile_config['intent']}**, "
+                    f"liked tags **{', '.join(profile_config['preferred_tags']) or 'none'}**."
+                )
                 top3_idx = sorted(valid, key=lambda i: -probs[i])[:3]
                 for rank, idx in enumerate(top3_idx):
                     m = MEALS[idx]
                     pct = probs[idx] * 100
                     bar_w = int(pct * 3)
+                    why = explain_recommendation(m, env, probs[idx])
                     st.markdown(f"""
-<div style="display:flex;align-items:center;gap:10px;padding:5px 0">
-  <span style="width:20px;color:var(--text-mute)">{rank+1}.</span>
-  <span style="font-size:1.2em">{m['emoji']}</span>
-  <span style="flex:1;font-size:0.9em;color:var(--text)">{m['name']}</span>
-  <div style="background:#E2E8F0;border-radius:4px;width:140px;height:10px;overflow:hidden">
-    <div style="background:var(--primary);width:{min(bar_w,140)}px;height:10px"></div>
+<div style="padding:7px 0;border-bottom:1px solid var(--border)">
+  <div style="display:flex;align-items:center;gap:10px">
+    <span style="width:20px;color:var(--text-mute)">{rank+1}.</span>
+    <span style="font-size:1.2em">{m['emoji']}</span>
+    <span style="flex:1;font-size:0.9em;color:var(--text)"><b>{m['name']}</b></span>
+    <div style="background:#E2E8F0;border-radius:4px;width:140px;height:10px;overflow:hidden">
+      <div style="background:var(--primary);width:{min(bar_w,140)}px;height:10px"></div>
+    </div>
+    <span style="font-size:0.85em;color:var(--primary);width:50px;text-align:right;font-weight:700">
+      {pct:.1f}%</span>
   </div>
-  <span style="font-size:0.85em;color:var(--primary);width:50px;text-align:right;font-weight:700">
-    {pct:.1f}%</span>
+  <div style="font-size:.74rem;color:var(--text-mute);line-height:1.35;margin-left:30px">
+    {why}
+  </div>
 </div>
 """, unsafe_allow_html=True)
 

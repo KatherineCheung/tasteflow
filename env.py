@@ -29,26 +29,27 @@ def make_meals():
     """Fixed pool of 14 candidate meals (2 per category)."""
     pool = []
     specs = [
-        ("Ramen",          "Japanese",  800,  12, ["Lunch","Dinner"]),
-        ("Sushi Set",      "Japanese",  600,  18, ["Lunch","Dinner"]),
-        ("Dim Sum",        "Chinese",   700,  10, ["Breakfast","Lunch"]),
-        ("Noodle Soup",    "Chinese",   650,   9, ["Breakfast","Lunch","Dinner"]),
-        ("Korean BBQ",     "Korean",    900,  20, ["Lunch","Dinner"]),
-        ("Bibimbap",       "Korean",    750,  13, ["Lunch","Dinner"]),
-        ("Burger",         "Fast Food", 900,   8, ["Breakfast","Lunch","Dinner"]),
-        ("Fried Chicken",  "Fast Food", 950,   7, ["Lunch","Dinner"]),
-        ("Salad Bowl",     "Light",     400,  10, ["Breakfast","Lunch"]),
-        ("Rice Bowl",      "Light",     500,  11, ["Lunch","Dinner"]),
-        ("Hot Pot",        "Hot Pot",  1100,  25, ["Dinner"]),
-        ("Mala Hot Pot",   "Hot Pot",  1050,  22, ["Dinner"]),
-        ("Pasta",          "Western",   750,  14, ["Lunch","Dinner"]),
-        ("Steak Set",      "Western",   800,  28, ["Dinner"]),
+        ("Ramen",          "Japanese",  800,  12, ["Lunch","Dinner"], ["comfort", "warm", "noodle"]),
+        ("Sushi Set",      "Japanese",  600,  18, ["Lunch","Dinner"], ["fresh", "high-protein", "light"]),
+        ("Dim Sum",        "Chinese",   700,  10, ["Breakfast","Lunch"], ["shareable", "comfort", "savory"]),
+        ("Noodle Soup",    "Chinese",   650,   9, ["Breakfast","Lunch","Dinner"], ["warm", "noodle", "budget"]),
+        ("Korean BBQ",     "Korean",    900,  20, ["Lunch","Dinner"], ["high-protein", "social", "grilled"]),
+        ("Bibimbap",       "Korean",    750,  13, ["Lunch","Dinner"], ["balanced", "spicy", "rice"]),
+        ("Burger",         "Fast Food", 900,   8, ["Breakfast","Lunch","Dinner"], ["quick", "comfort", "budget"]),
+        ("Fried Chicken",  "Fast Food", 950,   7, ["Lunch","Dinner"], ["quick", "comfort", "crispy"]),
+        ("Salad Bowl",     "Light",     400,  10, ["Breakfast","Lunch"], ["light", "healthy", "vegetarian"]),
+        ("Rice Bowl",      "Light",     500,  11, ["Lunch","Dinner"], ["balanced", "healthy", "rice"]),
+        ("Hot Pot",        "Hot Pot",  1100,  25, ["Dinner"], ["social", "warm", "premium"]),
+        ("Mala Hot Pot",   "Hot Pot",  1050,  22, ["Dinner"], ["social", "warm", "spicy"]),
+        ("Pasta",          "Western",   750,  14, ["Lunch","Dinner"], ["comfort", "quick", "savory"]),
+        ("Steak Set",      "Western",   800,  28, ["Dinner"], ["high-protein", "premium", "grilled"]),
     ]
-    for name, cat, cal, price, meal_types in specs:
+    for name, cat, cal, price, meal_types, tags in specs:
         pool.append({
             "name": name, "category": cat,
             "calories": cal, "price": price,
             "meal_types": meal_types,
+            "tags": tags,
             "emoji": MEAL_EMOJIS[cat],
         })
     return pool
@@ -166,6 +167,7 @@ class TasteFlowEnv:
             self.consec_churns = 0
         else:
             self.consec_churns += 1
+        self.user_profile.record_feedback(meal, response)
 
         # fatigue decay + update
         for i in range(N_CAT):
@@ -229,6 +231,7 @@ class TasteFlowEnv:
             "emoji":      meal["emoji"],
             "price":      meal["price"],
             "calories":   meal["calories"],
+            "tags":       list(meal.get("tags", [])),
             "response":   response,
             "reward":     reward,
             "r_terminal": 0.0,
@@ -244,7 +247,12 @@ class TasteFlowEnv:
 
     def get_valid_actions(self):
         mt = MEAL_TIMES[self.step_idx % N_MEALS_DAY]
-        return [i for i, m in enumerate(MEALS) if mt in m["meal_types"]]
+        meal_time_valid = [i for i, m in enumerate(MEALS) if mt in m["meal_types"]]
+        constrained = [
+            i for i in meal_time_valid
+            if self.user_profile.accepts_meal(MEALS[i])
+        ]
+        return constrained or meal_time_valid
 
     def summary(self):
         total_reward = sum(l["reward"] for l in self.log)
@@ -268,7 +276,9 @@ class UserProfile:
 
     def __init__(self, preferred_cat=None, budget_sensitivity=0.5,
                  calorie_sensitivity=0.3, fatigue_sensitivity=0.6,
-                 noise=0.15, preference_drift_at=None, drift_to=None):
+                 noise=0.15, preference_drift_at=None, drift_to=None,
+                 preferred_tags=None, avoided_tags=None, disliked_cats=None,
+                 max_price=None, max_calories_per_meal=None):
         self.preferred_cat        = preferred_cat or "Japanese"
         self.budget_sensitivity   = budget_sensitivity
         self.calorie_sensitivity  = calorie_sensitivity
@@ -277,13 +287,51 @@ class UserProfile:
         self.preference_drift_at  = preference_drift_at
         self.drift_to             = drift_to
         self.step_count           = 0
+        self.preferred_tags       = set(preferred_tags or [])
+        self.avoided_tags         = set(avoided_tags or [])
+        self.disliked_cats        = set(disliked_cats or [])
+        self.max_price            = max_price
+        self.max_calories_per_meal = max_calories_per_meal
+        self.tag_affinity         = {tag: 0.0 for meal in MEALS for tag in meal.get("tags", [])}
 
         n = N_CAT
         idx = CATEGORIES.index(self.preferred_cat)
         prefs = np.ones(n) * 0.3
         prefs[idx] = 1.0
+        for cat in self.disliked_cats:
+            if cat in CATEGORIES and cat != self.preferred_cat:
+                prefs[CATEGORIES.index(cat)] = 0.05
         prefs = prefs / prefs.sum()
         self.init_prefs = prefs
+
+    def accepts_meal(self, meal):
+        """Hard product constraints become the RL action mask."""
+        tags = set(meal.get("tags", []))
+        if meal["category"] in self.disliked_cats:
+            return False
+        if self.max_price is not None and meal["price"] > self.max_price:
+            return False
+        if (self.max_calories_per_meal is not None
+                and meal["calories"] > self.max_calories_per_meal):
+            return False
+        if tags & self.avoided_tags:
+            return False
+        return True
+
+    def record_feedback(self, meal, response):
+        """Session-level preference learning from the same env feedback loop."""
+        delta = {
+            "accept": 0.10,
+            "accept_browse": 0.05,
+            "reject": -0.06,
+            "churn": -0.12,
+            "invalid": -0.08,
+        }.get(response, 0.0)
+        for tag in meal.get("tags", []):
+            self.tag_affinity[tag] = float(np.clip(
+                self.tag_affinity.get(tag, 0.0) + delta,
+                -0.5, 0.5
+            ))
 
     def respond(self, meal, fatigue, pref_weights,
                 budget_spent, weekly_budget,
@@ -304,6 +352,13 @@ class UserProfile:
         else:
             base += pref_weights[cat_idx] * 2.0  # grows as agent learns
 
+        tags = set(meal.get("tags", []))
+        base += 0.35 * len(tags & self.preferred_tags)
+        base -= 1.8 * len(tags & self.avoided_tags)
+        base += sum(self.tag_affinity.get(tag, 0.0) for tag in tags)
+        if meal["category"] in self.disliked_cats:
+            base -= 2.0
+
         # fatigue penalty: kicks in hard above 0.8
         if fatigue[cat_idx] > 0.8:
             base -= (fatigue[cat_idx] - 0.8) * self.fatigue_sensitivity * 3.0
@@ -316,12 +371,17 @@ class UserProfile:
             base -= self.budget_sensitivity * 1.5
         elif meal["price"] <= pace:
             base += 0.3
+        if self.max_price is not None and meal["price"] <= self.max_price * 0.85:
+            base += 0.2
 
         # calorie fit
         cal_left = weekly_calories - calories_eaten
         cal_pace = cal_left / meals_left
         if meal["calories"] > cal_pace * 1.4:
             base -= self.calorie_sensitivity * 1.0
+        if (self.max_calories_per_meal is not None
+                and meal["calories"] <= self.max_calories_per_meal * 0.85):
+            base += 0.2
 
         # add noise
         score = base + np.random.normal(0, self.noise)
