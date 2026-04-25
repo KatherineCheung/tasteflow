@@ -406,6 +406,15 @@ def make_trained_cpo(weights):
 
 
 ALL_MEAL_TAGS = sorted({tag for meal in MEALS for tag in meal.get("tags", [])})
+MEAL_EMOJI_BY_NAME = {meal["name"]: meal["emoji"] for meal in MEALS}
+
+
+def display_meal_emoji(record):
+    """Use the current meal catalog so cached demo logs do not show stale icons."""
+    return MEAL_EMOJI_BY_NAME.get(
+        record.get("meal") or record.get("name"),
+        record.get("emoji", "🍽️"),
+    )
 
 
 def get_policy_probs(agent, state, valid_actions):
@@ -824,7 +833,7 @@ if mode == "📊 Watch the Agent Learn":
                         st.markdown(f"""
 <div style="display:flex;align-items:center;gap:10px;padding:6px 0;
             border-bottom:1px solid var(--border)">
-  <span style="font-size:1.4em">{step['emoji']}</span>
+  <span style="font-size:1.4em">{display_meal_emoji(step)}</span>
   <div style="flex:1;min-width:0">
     <b style="font-size:0.9em">{step['meal']}</b>
     <span style="font-size:0.75em;color:var(--text-mute);margin-left:6px">
@@ -1081,7 +1090,7 @@ Calories: {c_eaten:,} / 18,000 {c_ok}
                             st.markdown(f"""
 <div style="display:flex;align-items:center;gap:8px;padding:4px 0;
             border-bottom:1px solid var(--border)">
-  <span style="font-size:1.2em">{step['emoji']}</span>
+  <span style="font-size:1.2em">{display_meal_emoji(step)}</span>
   <div style="flex:1;min-width:0">
     <b style="font-size:0.85em">{step['meal']}</b>
     <span style="font-size:0.7em;color:var(--text-mute);margin-left:4px">
@@ -1460,7 +1469,7 @@ elif mode == "🎮 Be the User":
                     color = "var(--accept)" if r_val >= 0 else "var(--churn)"
                     rows_html += f"""
 <div class="phone-history-row">
-  <span style="font-size:1.1em">{entry['emoji']}</span>
+  <span style="font-size:1.1em">{display_meal_emoji(entry)}</span>
   <span class="name"><b>{entry['meal']}</b></span>
   <span style="color:var(--text-mute);font-size:.7rem">{RESPONSE_EMOJI.get(resp,'?')}</span>
   <b style="color:{color}">{r_val:+.1f}</b>
@@ -1630,7 +1639,7 @@ including soft goal bonuses. Best at long-horizon pacing.
                     st.markdown(f"""
 <div style="display:flex;align-items:center;gap:10px;padding:6px 0;
             border-bottom:1px solid var(--border)">
-  <span style="font-size:1.2em">{entry['emoji']}</span>
+  <span style="font-size:1.2em">{display_meal_emoji(entry)}</span>
   <span style="flex:1;min-width:0;font-size:0.85em">
     <span style="color:var(--text-mute)">{entry['day']} {entry['meal_time']}</span>
     — <b>{entry['meal']}</b>

@@ -19,9 +19,26 @@ FATIGUE_DECAY   = 0.6      # λ — half-life of ~2.5 meals
 CHURN_LIMIT     = 4        # consecutive churns → episode ends early
 STATE_DIM       = 4 + N_CAT + 4 + (N_CAT + 2)  # 4+7+4+9 = 24
 
-MEAL_EMOJIS = {
+CATEGORY_EMOJIS = {
     "Japanese":  "🍜", "Chinese": "🥡", "Korean":  "🍲",
     "Fast Food": "🍔", "Light":   "🥗", "Hot Pot": "🫕", "Western": "🥩",
+}
+
+MEAL_EMOJIS = {
+    "Ramen": "🍜",
+    "Sushi Set": "🍣",
+    "Dim Sum": "🥟",
+    "Noodle Soup": "🍲",
+    "Korean BBQ": "🍖",
+    "Bibimbap": "🍚",
+    "Burger": "🍔",
+    "Fried Chicken": "🍗",
+    "Salad Bowl": "🥗",
+    "Rice Bowl": "🍚",
+    "Hot Pot": "🫕",
+    "Mala Hot Pot": "🌶️",
+    "Pasta": "🍝",
+    "Steak Set": "🥩",
 }
 
 # ── Candidate meal pool ────────────────────────────────────────────────────
@@ -50,7 +67,7 @@ def make_meals():
             "calories": cal, "price": price,
             "meal_types": meal_types,
             "tags": tags,
-            "emoji": MEAL_EMOJIS[cat],
+            "emoji": MEAL_EMOJIS.get(name, CATEGORY_EMOJIS[cat]),
         })
     return pool
 
