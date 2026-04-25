@@ -8,6 +8,43 @@ python train.py       # ~90 seconds — trains PPO + CPO + evaluates all 5 agent
 streamlit run app.py  # opens in browser at localhost:8501
 ```
 
+## Troubleshooting
+
+If `streamlit run app.py` fails with `streamlit is not recognized` or
+`streamlit: command not found`, Streamlit is either not installed or is installed
+in a different Python environment.
+
+Run Streamlit through the active Python interpreter instead:
+
+```bash
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
+```
+
+On Windows, you can also use the Python launcher:
+
+```powershell
+py -m pip install -r requirements.txt
+py -m streamlit run app.py
+```
+
+If you prefer an isolated environment:
+
+```powershell
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+python -m streamlit run app.py
+```
+
+If PowerShell blocks virtual environment activation, enable scripts for the
+current terminal session only:
+
+```powershell
+Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
+.\.venv\Scripts\Activate.ps1
+```
+
 ## Files
 
 | File | Purpose |
