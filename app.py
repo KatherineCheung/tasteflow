@@ -224,6 +224,88 @@ st.markdown("""
     border-radius:12px !important;
   }
 
+  /* Keep the mock phone usable before Streamlit's columns naturally collapse. */
+  [data-testid="stHorizontalBlock"]:has(.phone-marker){
+    align-items:flex-start;
+  }
+  @media (max-width: 1120px){
+    [data-testid="stHorizontalBlock"]:has(.phone-marker){
+      flex-direction:column !important;
+      gap:1rem !important;
+    }
+    [data-testid="stHorizontalBlock"]:has(.phone-marker) > [data-testid="stColumn"]{
+      width:100% !important;
+      flex:1 1 auto !important;
+    }
+    [data-testid="stColumn"]:has(.phone-marker){
+      width:min(100%, 330px) !important;
+      max-width:330px !important;
+      margin:6px auto 18px !important;
+      box-sizing:border-box;
+    }
+  }
+  @media (max-width: 420px){
+    [data-testid="block-container"]{padding-left:.75rem; padding-right:.75rem;}
+    [data-testid="stColumn"]:has(.phone-marker){
+      padding:12px 9px 22px !important;
+      border-radius:32px !important;
+    }
+    [data-testid="stColumn"]:has(.phone-marker)::before{
+      top:14px; width:104px; height:18px;
+    }
+    [data-testid="stColumn"]:has(.phone-marker)::after{
+      bottom:8px; width:84px;
+    }
+    [data-testid="stColumn"]:has(.phone-marker) > [data-testid="stVerticalBlock"]{
+      border-radius:24px !important;
+      padding:34px 10px 16px !important;
+      min-height:560px;
+    }
+    .phone-statusbar{
+      display:grid;
+      grid-template-columns:1fr 1fr;
+      gap:5px 8px;
+      padding:7px 9px;
+      font-size:.68rem;
+    }
+    .phone-statusbar span:last-child{
+      grid-column:1 / -1;
+    }
+    .phone-progress{
+      display:grid;
+      grid-template-columns:1fr;
+      gap:7px;
+    }
+    .phone-progress > div{
+      padding:7px 9px;
+      font-size:.7rem;
+    }
+    .phone-meal{
+      padding:12px;
+    }
+    .phone-meal .meal-main{
+      flex-direction:column;
+      align-items:flex-start !important;
+      gap:6px !important;
+    }
+    .phone-meal .meal-emoji{
+      font-size:2.2em !important;
+    }
+    .phone-meal .meal-name{
+      font-size:.98rem !important;
+      overflow-wrap:normal;
+      word-break:normal;
+    }
+    .pill{
+      font-size:.68rem;
+      padding:3px 8px;
+    }
+    [data-testid="stColumn"]:has(.phone-marker) .stButton > button{
+      font-size:.78rem !important;
+      min-height:2.25rem;
+    }
+  }
+
   /* ── Sticky comparison table (fix #8) ── */
   .compare-table-wrap{
     overflow-x:auto; border:1px solid var(--border);
@@ -1183,10 +1265,10 @@ elif mode == "🎮 Be the User":
   <div style="font-size:.7rem;color:var(--text-mute);margin-bottom:6px">
     🤖 Recommended for you
   </div>
-  <div style="display:flex;align-items:center;gap:10px">
-    <span style="font-size:2.6em;line-height:1">{meal['emoji']}</span>
+  <div class="meal-main" style="display:flex;align-items:center;gap:10px">
+    <span class="meal-emoji" style="font-size:2.6em;line-height:1">{meal['emoji']}</span>
     <div style="flex:1;min-width:0">
-      <div style="font-weight:800;font-size:1rem;color:var(--text)">{meal['name']}</div>
+      <div class="meal-name" style="font-weight:800;font-size:1rem;color:var(--text)">{meal['name']}</div>
       <div style="font-size:.72rem;color:var(--text-mute)">{meal['category']}</div>
     </div>
   </div>
