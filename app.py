@@ -13,7 +13,12 @@ Run:
 import streamlit as st
 import numpy as np
 import pickle, os, sys
-sys.path.insert(0, os.path.dirname(__file__))
+
+# Project root (must be absolute so Streamlit Cloud finds local `env` / `agents`
+# when cwd is not the repo root).
+_APP_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _APP_ROOT not in sys.path:
+    sys.path.insert(0, _APP_ROOT)
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots

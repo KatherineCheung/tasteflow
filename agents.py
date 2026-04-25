@@ -12,6 +12,14 @@ Agents:
                             `CPOAgent` is kept as a backward-compat alias.
 """
 
+import os
+import sys
+
+# Ensure the directory containing this file is on the path (Cloud / odd cwd).
+_agents_dir = os.path.dirname(os.path.abspath(__file__))
+if _agents_dir not in sys.path:
+    sys.path.insert(0, _agents_dir)
+
 import numpy as np
 from env import N_ACTIONS, STATE_DIM, CATEGORIES, N_CAT, MEALS
 

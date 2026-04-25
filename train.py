@@ -15,7 +15,9 @@ import sys
 
 import numpy as np
 
-sys.path.insert(0, os.path.dirname(__file__))
+_TRAIN_ROOT = os.path.dirname(os.path.abspath(__file__))
+if _TRAIN_ROOT not in sys.path:
+    sys.path.insert(0, _TRAIN_ROOT)
 
 from env import TasteFlowEnv, UserProfile, MEALS  # noqa: E402
 from agents import (                                # noqa: E402
