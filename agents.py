@@ -3,11 +3,13 @@ Agents:
   - RandomAgent      : uniform random baseline
   - RuleBasedAgent   : recency + variety heuristic (no learning)
   - LinUCBAgent      : contextual bandit (Section 2 comparison)
-  - PPOAgent         : full MDP agent (from-scratch NumPy PPO)
-  - CPOAgent         : Constrained RL via Primal-Dual (Lagrangian) method
-                       Treats budget + calorie limits as Lagrangian constraints,
-                       not soft reward bonuses. Multipliers adapt online to
-                       enforce constraints while maximising acceptance reward.
+  - PPOAgent              : full MDP agent (from-scratch NumPy PPO)
+  - LagrangianPPOAgent    : PPO-Lagrangian (a.k.a. PPO-L) — primal-dual constrained RL.
+                            Treats budget + calorie limits as Lagrangian constraints
+                            with online dual updates. This is the standard safe-RL
+                            baseline (Ray et al., 2019), distinct from true CPO
+                            (Achiam et al., 2017) which uses trust-region updates.
+                            `CPOAgent` is kept as a backward-compat alias.
 """
 
 import numpy as np
@@ -375,10 +377,15 @@ class PPOAgent:
         }
 
 
-# ── CPO Agent (Constrained Policy Optimization — Primal-Dual) ─────────────
-class CPOAgent:
+# ── PPO-Lagrangian Agent (primal-dual constrained PPO) ────────────────────
+class LagrangianPPOAgent:
     """
-    Constrained Policy Optimization via the Primal-Dual (Lagrangian) method.
+    PPO-Lagrangian (PPO-L) — primal-dual constrained RL.
+
+    Standard safe-RL baseline (Ray et al., 2019, "Benchmarking Safe Exploration
+    in Deep RL"). NOT the same as true CPO (Achiam et al., 2017), which uses
+    trust-region constraints with conjugate gradient and second-order updates;
+    we deliberately use the simpler primal-dual formulation here.
 
     Core idea
     ---------
@@ -415,7 +422,7 @@ class CPOAgent:
     actor loss. Constraint costs are tracked separately and fed into the
     Lagrange multiplier update step.
     """
-    name  = "CPO (Constrained)"
+    name  = "PPO-Lagrangian"
     color = "#A78BFA"   # purple — distinct from PPO teal
 
     # Constraint limits (fraction of weekly goal consumed)
@@ -681,3 +688,9 @@ class CPOAgent:
             "n_eps":             n_completed_eps,
             "policy_updated":    True,
         }
+
+
+# Backward-compat alias — older code (and earlier pickles) refer to CPOAgent.
+# PPO-Lagrangian is what this implementation actually is; the alias keeps imports
+# from breaking and lets old saved weights load into the same network.
+CPOAgent = LagrangianPPOAgent

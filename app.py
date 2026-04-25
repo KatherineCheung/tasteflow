@@ -20,7 +20,7 @@ from plotly.subplots import make_subplots
 
 from env import (TasteFlowEnv, UserProfile, CATEGORIES, MEALS,
                  MEAL_TIMES, DAYS)
-from agents import (GreedyAgent, EpsilonGreedyAgent, PPOAgent, CPOAgent)
+from agents import (GreedyAgent, EpsilonGreedyAgent, PPOAgent, LagrangianPPOAgent)
 
 # ── Page config ────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -356,7 +356,7 @@ AGENT_COLORS = {
     "Rule-Based":  "#EA580C",
     "LinUCB":      "#CA8A04",
     "PPO":         "#0F766E",
-    "CPO":         "#7C3AED",
+    "PPO-L":       "#7C3AED",
 }
 RESPONSE_EMOJI = {
     "accept": "✅", "accept_browse": "👍",
@@ -398,8 +398,8 @@ def make_trained_ppo(weights):
     return agent
 
 
-def make_trained_cpo(weights):
-    agent = CPOAgent()
+def make_trained_ppol(weights):
+    agent = LagrangianPPOAgent()
     for k, v in weights.items():
         setattr(agent, k, v)
     return agent
@@ -507,7 +507,7 @@ with st.sidebar:
     st.divider()
     with st.expander("ℹ️ About", expanded=False):
         st.markdown("""
-**TasteFlow** trains **PPO** and **CPO** to learn weekly food preferences.
+**TasteFlow** trains **PPO** and **PPO-Lagrangian (PPO-L)** to learn weekly food preferences.
 
 - **State (24-dim):** budget, calories, fatigue, meal time, prefs
 - **Reward:** accept +5, reject −2, churn −10, weekly goals +50
@@ -561,35 +561,35 @@ if mode == "📊 Watch the Agent Learn":
         tab1, tab2, tab3, tab4, tab5 = st.tabs([
             "📈 Learning Curve", "🏆 Agent Comparison",
             "🔄 Before vs After", "🧠 State & Reward Breakdown",
-            "⚖️ CPO: Constraint Analysis",
+            "⚖️ PPO-L: Constraint Analysis",
         ])
 
         # ── TAB 1: Learning Curve ──
         with tab1:
-            st.markdown("### Learning Curves — PPO vs CPO (800 Episodes)")
+            st.markdown("### Learning Curves — PPO vs PPO-Lagrangian (800 Episodes)")
             st.markdown(
                 "Both agents learn from scratch. **PPO** maximises total reward "
-                "(including soft goal bonuses). **CPO** maximises *only* acceptance "
+                "(including soft goal bonuses). **PPO-L** maximises *only* acceptance "
                 "reward while the Lagrange multipliers handle constraints separately — "
                 "watch how λ_budget grows as the agent learns to pace spending."
             )
 
-            cpo_curve  = data.get("cpo_curve", [])
+            ppol_curve = data.get("ppol_curve", data.get("cpo_curve", []))
             lambda_b   = data.get("lambda_b_curve", [])
             lambda_c   = data.get("lambda_c_curve", [])
 
-            eps_ppo  = [x[0] for x in ppo_curve]
-            rews_ppo = [x[1] for x in ppo_curve]
-            eps_cpo  = [x[0] for x in cpo_curve]
-            rews_cpo = [x[1] for x in cpo_curve]
+            eps_ppo   = [x[0] for x in ppo_curve]
+            rews_ppo  = [x[1] for x in ppo_curve]
+            eps_ppol  = [x[0] for x in ppol_curve]
+            rews_ppol = [x[1] for x in ppol_curve]
 
             fig = make_subplots(rows=1, cols=2,
-                subplot_titles=("Episode Reward (rolling mean 20)", "CPO Lagrange Multipliers λ"))
+                subplot_titles=("Episode Reward (rolling mean 20)", "PPO-L Lagrange Multipliers λ"))
 
             fig.add_trace(go.Scatter(x=eps_ppo, y=rews_ppo, mode="lines",
                 line=dict(color=AGENT_COLORS["PPO"], width=2.5), name="PPO"), row=1, col=1)
-            fig.add_trace(go.Scatter(x=eps_cpo, y=rews_cpo, mode="lines",
-                line=dict(color=AGENT_COLORS["CPO"], width=2.5), name="CPO"), row=1, col=1)
+            fig.add_trace(go.Scatter(x=eps_ppol, y=rews_ppol, mode="lines",
+                line=dict(color=AGENT_COLORS["PPO-L"], width=2.5), name="PPO-L"), row=1, col=1)
             fig.add_vline(x=100, line_dash="dash", line_color="#DC2626",
                 line_width=1.2, row=1, col=1)
             fig.add_annotation(x=120, y=min(rews_ppo)*0.85,
@@ -625,9 +625,9 @@ if mode == "📊 Watch the Agent Learn":
             cols[0].metric("PPO ep10",   f"{rews_ppo[0]:+.1f}")
             cols[1].metric("PPO final",  f"{rews_ppo[-1]:+.1f}",
                            delta=f"{rews_ppo[-1]-rews_ppo[0]:+.1f}")
-            cols[2].metric("CPO ep10",   f"{rews_cpo[0]:+.1f}" if rews_cpo else "—")
-            cols[3].metric("CPO final",  f"{rews_cpo[-1]:+.1f}" if rews_cpo else "—",
-                           delta=f"{rews_cpo[-1]-rews_cpo[0]:+.1f}" if rews_cpo else None)
+            cols[2].metric("PPO-L ep10",   f"{rews_ppol[0]:+.1f}" if rews_ppol else "—")
+            cols[3].metric("PPO-L final",  f"{rews_ppol[-1]:+.1f}" if rews_ppol else "—",
+                           delta=f"{rews_ppol[-1]-rews_ppol[0]:+.1f}" if rews_ppol else None)
 
         # ── TAB 2: Agent Comparison ──
         with tab2:
@@ -774,7 +774,7 @@ if mode == "📊 Watch the Agent Learn":
                 "Rule-Based": ("#EA580C", "Hand-tuned heuristic — preference + fatigue + budget score. No learning, but structured."),
                 "LinUCB":     ("#CA8A04", "Contextual bandit — learns preferences but treats each meal as independent, so budget pacing fails."),
                 "PPO":        ("#0F766E", "Best overall reward. Full MDP with temporal reasoning — learns to pace budget and calories across the week."),
-                "CPO":        ("#7C3AED", "Explicit constraint enforcement via Lagrange multipliers — enforces budget/calorie goals; trades some reward for compliance."),
+                "PPO-L":      ("#7C3AED", "PPO-Lagrangian: explicit constraint enforcement via online dual updates on budget/calorie limits — trades some reward for compliance."),
             }
             for n in agent_names:
                 col, text = takeaways.get(n, ("#94A3B8", n))
@@ -934,14 +934,15 @@ if mode == "📊 Watch the Agent Learn":
                 fig_g.update_yaxes(**GRID, row=1, col=i)
             st.plotly_chart(fig_g, use_container_width=True)
 
-        # ── TAB 5: CPO Constraint Analysis ──
+        # ── TAB 5: PPO-Lagrangian Constraint Analysis ──
         with tab5:
-            st.markdown("### ⚖️ CPO: Constrained Policy Optimization")
+            st.markdown("### ⚖️ PPO-Lagrangian (PPO-L): Primal-Dual Constrained RL")
             st.markdown("""
-**Why CPO?** PPO folds budget and calorie goals into the reward as *soft bonuses* —
+**Why PPO-L?** PPO folds budget and calorie goals into the reward as *soft bonuses* —
 the agent can trade constraint satisfaction for higher acceptance rewards.
-CPO treats them as **hard constraints** via Lagrangian relaxation, enforcing
-them at convergence regardless of the reward landscape.
+**PPO-Lagrangian** (Ray et al., 2019 — the standard safe-RL baseline) treats them
+as **explicit constraints** via Lagrangian relaxation, with multipliers that adapt
+online to enforce them, regardless of the reward landscape.
 """)
 
             st.markdown("#### The Lagrangian Saddle-Point Problem")
@@ -974,7 +975,7 @@ L(π, λ) = E[Σ r_accept]<br>
 ⚖️ The multipliers are <b>self-tuning</b> — no manual<br>
 &nbsp;&nbsp;&nbsp;reward engineering needed.<br><br>
 <span style="color:#15803D">vs PPO: PPO uses fixed r_goal weights.<br>
-CPO adapts its constraint pressure dynamically.</span>
+PPO-L adapts its constraint pressure dynamically.</span>
 </div>
 """, unsafe_allow_html=True)
 
@@ -1052,18 +1053,18 @@ CPO adapts its constraint pressure dynamically.</span>
                 fig_con.update_yaxes(**GRID, range=[0, 115], row=1, col=c)
             st.plotly_chart(fig_con, use_container_width=True)
 
-            st.markdown("#### Episode Comparison: PPO vs CPO")
+            st.markdown("#### Episode Comparison: PPO vs PPO-L")
             st.markdown("Same user, same week. PPO maximises reward but may overspend. "
-                        "CPO trades some reward for guaranteed constraint compliance.")
+                        "PPO-L trades some reward for tighter constraint compliance.")
 
-            log_ppo_d = data.get("log_after", [])
-            log_cpo_d = data.get("log_cpo", [])
+            log_ppo_d  = data.get("log_after", [])
+            log_ppol_d = data.get("log_ppol", data.get("log_cpo", []))
 
-            if log_ppo_d and log_cpo_d:
+            if log_ppo_d and log_ppol_d:
                 col_p, col_c = st.columns(2)
                 for col, log_d, label, color in [
-                    (col_p, log_ppo_d, "PPO", "#0F766E"),
-                    (col_c, log_cpo_d, "CPO", "#7C3AED"),
+                    (col_p, log_ppo_d,  "PPO",   "#0F766E"),
+                    (col_c, log_ppol_d, "PPO-L", "#7C3AED"),
                 ]:
                     with col:
                         total_r = sum(l["reward"] for l in log_d)
@@ -1180,15 +1181,16 @@ That's the value of 1-in-10 random meal decisions.
             st.markdown("---")
             st.markdown("""
 <div class="meal-card" style="margin-top:8px">
-<b style="color:#7C3AED;font-size:1.05em">📐 The academic contribution</b><br><br>
-Most food recommendation papers use PPO or DQN with soft reward shaping.
-TasteFlow's CPO formulation is novel: we treat user goals as <b>Lagrangian constraints</b>
-on the policy optimisation problem, not as reward components to be traded off.
+<b style="color:#7C3AED;font-size:1.05em">📐 The framing contribution</b><br><br>
+Most food recommendation papers fold goals into PPO/DQN reward shaping.
+TasteFlow casts the same problem as a <b>constrained MDP</b> and solves it with
+<b>PPO-Lagrangian</b> (Ray et al., 2019) — budget and calorie targets become
+explicit constraints with online dual updates, not hand-tuned reward weights.
 <br><br>
-This gives us a formal guarantee — the KKT conditions ensure that at convergence,
-either the constraint is satisfied, or the multiplier is zero (it wasn't binding).
-No prior food recommendation work we are aware of uses constrained MDP for goal enforcement.
-This is the grader-facing research contribution.
+The KKT conditions imply that at convergence, either the constraint is satisfied
+or the multiplier is zero (it wasn't binding). In practice, convergence depends
+on learning rates and training length — we report empirical attainment in the
+results table, not formal guarantees.
 </div>
 """, unsafe_allow_html=True)
 
@@ -1214,12 +1216,12 @@ elif mode == "🎮 Be the User":
     agent_choice = st.radio(
         "Recommender agent",
         ["🤖 PPO (maximises reward)",
-         "⚖️ CPO (enforces budget & calorie constraints)",
+         "⚖️ PPO-L (enforces budget & calorie constraints)",
          "🎯 Greedy (pure exploitation — ε=0)",
          "🎲 ε-Greedy (10% exploration)"],
         horizontal=True,
     )
-    use_cpo     = "CPO"      in agent_choice
+    use_ppol    = "PPO-L"    in agent_choice
     use_greedy  = "Greedy"   in agent_choice and "ε" not in agent_choice
     use_egreedy = "ε-Greedy" in agent_choice
 
@@ -1302,8 +1304,10 @@ elif mode == "🎮 Be the User":
         st.session_state.ppo_agent       = make_trained_ppo(data["ppo_weights"])
         st.session_state.greedy_agent    = GreedyAgent()
         st.session_state.egreedy_agent   = EpsilonGreedyAgent(epsilon=0.1)
-        if "cpo_weights" in data:
-            st.session_state.cpo_agent   = make_trained_cpo(data["cpo_weights"])
+        # Backward-compat: load 'ppol_weights' (new) or 'cpo_weights' (legacy pkl)
+        ppol_w = data.get("ppol_weights", data.get("cpo_weights"))
+        if ppol_w is not None:
+            st.session_state.ppol_agent  = make_trained_ppol(ppol_w)
         st.session_state.current_rec     = None
         st.session_state.current_probs   = None
 
@@ -1312,8 +1316,8 @@ elif mode == "🎮 Be the User":
         agent = st.session_state.greedy_agent
     elif use_egreedy:
         agent = st.session_state.egreedy_agent
-    elif use_cpo and "cpo_agent" in st.session_state:
-        agent = st.session_state.cpo_agent
+    elif use_ppol and "ppol_agent" in st.session_state:
+        agent = st.session_state.ppol_agent
     else:
         agent = st.session_state.ppo_agent
     s        = st.session_state.game_state
@@ -1510,10 +1514,10 @@ elif mode == "🎮 Be the User":
     # ╔════════════════════════ ANALYST COL ════════════════════════╗
     with analyst_col:
         # ── Agent banner (context for the chosen agent) ──
-        if use_cpo:
+        if use_ppol:
             st.markdown("""
 <div class="mode-banner" style="border-color:#DDD6FE;background:linear-gradient(135deg,#F5F3FF,#FFFFFF)">
-⚖️ <b style="color:#7C3AED">CPO Mode:</b> This agent's policy is penalised when budget or
+⚖️ <b style="color:#7C3AED">PPO-Lagrangian Mode:</b> This agent's policy is penalised when budget or
 calorie spending runs ahead of pace — Lagrange multipliers auto-tune the constraint pressure.
 Watch how it picks lighter/cheaper meals as the week progresses.
 </div>

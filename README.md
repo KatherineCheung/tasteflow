@@ -1,10 +1,10 @@
-# TasteFlow — RL Demo App (PPO + CPO)
+# TasteFlow — RL Demo App (PPO + PPO-Lagrangian)
 
 ## Quick Start
 
 ```bash
 pip install -r requirements.txt
-python train.py              # trains PPO + CPO + pre-trains all baselines (~60s)
+python train.py              # trains PPO + PPO-L + pre-trains all baselines (~60s)
 python train.py --ablation   # additionally runs the env-component ablation (~3 min)
 streamlit run app.py         # opens in browser at localhost:8501
 ```
@@ -55,8 +55,8 @@ Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass
 | File | Purpose |
 |------|---------|
 | `env.py` | TasteFlow MDP — 24-dim state, fatigue decay, budget/calorie tracking, weekly settlement |
-| `agents.py` | 7 agents: Random, Greedy, ε-Greedy, Rule-Based, LinUCB, PPO, **CPO** |
-| `train.py` | Trains PPO + CPO, evaluates all agents, saves `tasteflow_results.pkl` |
+| `agents.py` | 7 agents: Random, Greedy, ε-Greedy, Rule-Based, LinUCB, PPO, **PPO-Lagrangian** |
+| `train.py` | Trains PPO + PPO-L, evaluates all agents, saves `tasteflow_results.pkl` |
 | `app.py` | Streamlit demo — two modes, five tabs |
 | `requirements.txt` | Python dependencies for local setup and Streamlit Community Cloud |
 | `runtime.txt` | Python runtime version for Streamlit Community Cloud |
@@ -84,22 +84,28 @@ updated file when you want the hosted demo to show the new results.
 
 | Tab | Content |
 |-----|---------|
-| 📈 Learning Curve | PPO vs CPO reward curves + Lagrange multiplier evolution |
+| 📈 Learning Curve | PPO vs PPO-L reward curves + Lagrange multiplier evolution |
 | 🏆 Agent Comparison | Reward / budget attainment / churn across all 7 agents |
 | 🔄 Before vs After | Random agent vs trained PPO episode log |
 | 🧠 State & Reward Breakdown | Fatigue heatmap, reward decomposition, goal tracking |
-| **⚖️ CPO: Constraint Analysis** | **Lagrangian formulation, λ curves, constraint violation comparison, PPO vs CPO episode diff** |
+| **⚖️ PPO-L: Constraint Analysis** | **Lagrangian formulation, λ curves, constraint violation comparison, PPO vs PPO-L episode diff** |
 
 ### 🎮 Be the User
-Interactive episode — choose PPO or CPO as your recommender, click Accept/Reject/Churn,
+Interactive episode — choose PPO or PPO-L as your recommender, click Accept/Reject/Churn,
 watch the state update and reward accumulate in real time.
 
-## CPO — Primal-Dual Constrained RL
+## PPO-Lagrangian (PPO-L) — Primal-Dual Constrained RL
+
+> **Naming note.** This is **PPO-Lagrangian** (Ray et al., 2019, *Benchmarking
+> Safe Exploration in Deep RL*) — the standard primal-dual safe-RL baseline.
+> It is **not** true CPO (Achiam et al., 2017), which uses trust-region constraints
+> with conjugate gradient and second-order updates. Earlier drafts of this project
+> called the agent "CPO"; that label was inaccurate and has been corrected.
 
 PPO folds budget/calorie goals into the reward as *soft bonuses* (r_goal).
 The agent can trade constraint satisfaction for acceptance reward.
 
-CPO separates the primary objective from constraint enforcement
+PPO-L separates the primary objective from constraint enforcement
 using the **Primal-Dual (Lagrangian) method**:
 
 ```
@@ -129,12 +135,12 @@ Confidence intervals are 95% (normal approx, n=50).
 | Rule-Based    | +126.1 ± 4.4  |  34% | 100% |  34% | 0% |
 | LinUCB        | +133.4 ± 0.5  |   0% | 100% |   0% | 0% |
 | **PPO**       | **+186.5 ± 1.6** | **98%** | **100%** | **98%** | 0% |
-| **CPO**       | **+183.0 ± 2.1** |  96% | 100% |  96% | 0% |
+| **PPO-L**     | **+183.0 ± 2.1** |  96% | 100% |  96% | 0% |
 
 **Take-aways**
 
 - **PPO** wins on reward via explicit goal shaping (`r_goal`) folded into the per-step reward.
-- **CPO** matches PPO on both reward and constraint satisfaction *without* using `r_goal` — it
+- **PPO-L** matches PPO on both reward and constraint satisfaction *without* using `r_goal` — it
   enforces the budget purely through the Lagrange multiplier λ_b, which converges around 4.6.
 - **ε-Greedy** is a surprisingly strong baseline once given the same training budget, lifting
   Greedy from 0% → 100% budget through 10% exploration alone.
@@ -176,7 +182,7 @@ recent picks, time of day) and proposes one meal per slot.
 | Weekly pacing of budget/calories | Static rules can't trade off "save now, splurge later" | Sequential MDP optimises return over the whole horizon |
 | Personalisation that adapts | A rule needs to be re-coded per user | Policy is a function of state — adapts via online preference EMA |
 | Non-stationary preferences | Rules need explicit override paths | Policy gradient adapts to drift (preferred-cat shift at step 10) |
-| Safety / nutrition constraints | Hard-coded constraints have no reward trade-off | CPO enforces via Lagrangian, learns dual price of each constraint |
+| Safety / nutrition constraints | Hard-coded constraints have no reward trade-off | PPO-Lagrangian enforces via Lagrangian, learns dual price of each constraint |
 
 **Monetisation paths.** (i) B2C subscription with personalised weekly plans;
 (ii) B2B partnership with food-delivery platforms — surface high-margin items
@@ -185,7 +191,7 @@ buy seats for staff; (iv) restaurant recommendation marketplace where vendors bi
 for action-mask inclusion within compliant meals.
 
 **Evaluation against this case.** The simulator + RL pipeline shown above is a
-pre-product validation of the **mechanism**: PPO/CPO can learn to satisfy weekly
+pre-product validation of the **mechanism**: PPO and PPO-L can learn to satisfy weekly
 budget/calorie constraints from interaction signals alone, and outperform both
 heuristic and bandit baselines that lack a notion of episode-level state. A real
 deployment would replace `UserProfile` with logged user data and a learned reward
@@ -197,9 +203,9 @@ model, and replace the 14-meal pool with a live restaurant catalogue.
   when the unclipped term binds, zero in the strict-clip zone) — *not* the
   REINFORCE-style approximation that earlier versions used. Entropy gradient is also
   back-propagated, so the entropy bonus actually influences updates.
-- **CPO** uses **two-timescale** primal-dual: λ_b, λ_c update *every* episode (fast),
-  while the policy updates every `n_episodes_per_update` episodes (slow, batch=4).
-  CPO returns are *not* z-normalised — that destroys the absolute scale of the
-  Lagrangian penalty `−λ·cost` relative to `r_accept`.
+- **PPO-Lagrangian** uses **two-timescale** primal-dual: λ_b, λ_c update *every*
+  episode (fast), while the policy updates every `n_episodes_per_update` episodes
+  (slow). PPO-L returns are *not* z-normalised — that destroys the absolute scale
+  of the Lagrangian penalty `−λ·cost` relative to `r_accept`.
 - **State** is 24-dim including a real `time_since_last` (hours since last accepted meal,
   capped at 24). Earlier versions hardcoded this to 4.0; that bug is fixed.

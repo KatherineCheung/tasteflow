@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from env import TasteFlowEnv, UserProfile, MEALS  # noqa: E402
 from agents import (                                # noqa: E402
     RandomAgent, RuleBasedAgent, LinUCBAgent,
-    PPOAgent, CPOAgent, GreedyAgent, EpsilonGreedyAgent,
+    PPOAgent, LagrangianPPOAgent, GreedyAgent, EpsilonGreedyAgent,
 )
 
 N_TRAIN_EPISODES = 800
@@ -60,7 +60,7 @@ def run_ppo(env, agent, train=True):
     return total, env.summary()
 
 
-def run_cpo(env, agent, train=True):
+def run_ppol(env, agent, train=True):
     s = env.reset(); done = False; total = 0.0
     while not done:
         valid = env.get_valid_actions()
@@ -148,7 +148,7 @@ def evaluate(name, agent, run_fn, n_eval, env_kwargs=None):
 # ── Main training & evaluation pipeline ─────────────────────────────────
 def train_and_evaluate():
     print("=" * 64)
-    print("  TasteFlow — Training Run  (PPO + CPO + fair-baseline comparison)")
+    print("  TasteFlow — Training Run  (PPO + PPO-L + fair-baseline comparison)")
     print(f"  Train episodes: {N_TRAIN_EPISODES}   Eval episodes: {N_EVAL_EPISODES}")
     print("=" * 64)
 
@@ -166,25 +166,26 @@ def train_and_evaluate():
         if ep % PRINT_EVERY == 0:
             print(f"    PPO ep {ep:4d} | Mean(20): {np.mean(recent):+.1f}")
 
-    # ── Train CPO ──────────────────────────────────────────────────
-    print("\n  [2/4] Training CPO...")
-    cpo = CPOAgent(lr_policy=3e-3, lr_lambda=1e-1, gamma=0.95,
-                   lambda_init=0.5, lambda_max=50.0,
-                   n_episodes_per_update=1)   # CPO: per-episode policy update
-                                              # so dual & primal stay in sync
-    cpo_curve, lambda_b_curve, lambda_c_curve, recent = [], [], [], []
+    # ── Train PPO-Lagrangian (PPO-L) ───────────────────────────────
+    print("\n  [2/4] Training PPO-Lagrangian (PPO-L)...")
+    ppol = LagrangianPPOAgent(
+        lr_policy=3e-3, lr_lambda=1e-1, gamma=0.95,
+        lambda_init=0.5, lambda_max=50.0,
+        n_episodes_per_update=1,   # per-episode policy update so dual & primal stay in sync
+    )
+    ppol_curve, lambda_b_curve, lambda_c_curve, recent = [], [], [], []
     for ep in range(1, N_TRAIN_EPISODES + 1):
         env = make_env(make_profile(ep))
-        r, _ = run_cpo(env, cpo)
+        r, _ = run_ppol(env, ppol)
         recent.append(r)
         if len(recent) > 20: recent.pop(0)
         if ep % 10 == 0:
-            cpo_curve.append((ep, float(np.mean(recent))))
-            lambda_b_curve.append((ep, cpo.lambda_budget))
-            lambda_c_curve.append((ep, cpo.lambda_calorie))
+            ppol_curve.append((ep, float(np.mean(recent))))
+            lambda_b_curve.append((ep, ppol.lambda_budget))
+            lambda_c_curve.append((ep, ppol.lambda_calorie))
         if ep % PRINT_EVERY == 0:
-            print(f"    CPO ep {ep:4d} | Mean(20): {np.mean(recent):+.1f} | "
-                  f"λ_b={cpo.lambda_budget:.3f} λ_c={cpo.lambda_calorie:.3f}")
+            print(f"    PPO-L ep {ep:4d} | Mean(20): {np.mean(recent):+.1f} | "
+                  f"λ_b={ppol.lambda_budget:.3f} λ_c={ppol.lambda_calorie:.3f}")
 
     # ── Pre-train baselines for fair comparison ────────────────────
     # Greedy / ε-Greedy / LinUCB get the SAME N_TRAIN_EPISODES budget
@@ -208,7 +209,7 @@ def train_and_evaluate():
         ("Rule-Based",  rulebased,        run_generic),
         ("LinUCB",      linucb,           run_generic),
         ("PPO",         ppo,              run_ppo),
-        ("CPO",         cpo,              run_cpo),
+        ("PPO-L",       ppol,             run_ppol),
     ]
     results = {}
     for name, agent, run_fn in agent_configs:
@@ -224,14 +225,14 @@ def train_and_evaluate():
     log_greedy  = demo_log(greedy,         run_generic)
     log_egreedy = demo_log(egreedy,        run_generic)
     log_ppo     = demo_log(ppo,            run_ppo)
-    log_cpo     = demo_log(cpo,            run_cpo)
+    log_ppol    = demo_log(ppol,           run_ppol)
 
     # ── Save ──────────────────────────────────────────────────────
     save_path = os.path.join(os.path.dirname(__file__), "tasteflow_results.pkl")
     with open(save_path, "wb") as f:
         pickle.dump({
             "ppo_curve":      ppo_curve,
-            "cpo_curve":      cpo_curve,
+            "ppol_curve":     ppol_curve,
             "lambda_b_curve": lambda_b_curve,
             "lambda_c_curve": lambda_c_curve,
             "results":        results,
@@ -239,10 +240,10 @@ def train_and_evaluate():
             "log_greedy":     log_greedy,
             "log_egreedy":    log_egreedy,
             "log_after":      log_ppo,
-            "log_cpo":        log_cpo,
+            "log_ppol":       log_ppol,
             "ppo_weights":    {k: getattr(ppo, k)
                                for k in ["W1","b1","W2","b2","Wp","bp","Wv","bv"]},
-            "cpo_weights":    {k: getattr(cpo, k)
+            "ppol_weights":   {k: getattr(ppol, k)
                                for k in ["W1","b1","W2","b2","Wp","bp","Wv","bv",
                                          "lambda_budget","lambda_calorie"]},
             "config": {
@@ -255,7 +256,7 @@ def train_and_evaluate():
             },
         }, f)
     print(f"\n  Saved → {save_path}")
-    return ppo_curve, cpo_curve, results
+    return ppo_curve, ppol_curve, results
 
 
 # ── Ablation study ──────────────────────────────────────────────────────
